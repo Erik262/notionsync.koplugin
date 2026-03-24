@@ -13,24 +13,61 @@ local GetHighlights = require("get_highlights")
 local NotionClient = require("notion_client")
 local SyncManager = require("sync_manager")
 
+local function getPluginDir()
+    local source = debug.getinfo(1, "S").source or ""
+    if source:sub(1, 1) == "@" then
+        source = source:sub(2)
+    end
+    return source:match("^(.*)/[^/]+$") or "."
+end
+
+local function joinPath(...)
+    local parts = { ... }
+    return table.concat(parts, "/")
+end
+
+local function loadLuaTable(path)
+    local chunk, err = loadfile(path)
+    if not chunk then
+        return nil, err
+    end
+
+    local ok, result = pcall(chunk)
+    if not ok then
+        return nil, result
+    end
+    if type(result) ~= "table" then
+        return nil, "Config must return a table"
+    end
+
+    return result
+end
+
 local NotionSync = WidgetContainer:new{
     name = "NotionSync",
     config = {
         notion_token = "",
-        database_id = ""
+        database_id = "",
+        notion_version = "2022-06-28",
+        metadata_sync = true
     },
     client = nil,
-    config_file = "plugins/notionsync.koplugin/config.json"
+    plugin_dir = nil,
+    config_file = nil,
+    credentials_file = nil
 }
 
 function NotionSync:init()
+    self.plugin_dir = getPluginDir()
+    self.config_file = joinPath(self.plugin_dir, "config.json")
+    self.credentials_file = joinPath(self.plugin_dir, "notion_credentials.lua")
     self.ui.menu:registerToMainMenu(self)
     self:loadConfig()
 
-    Dispatcher:registerAction("notionsync_action", {
+    Dispatcher:registerAction("notionsync_current_book", {
         category = "none",
         event = "NotionSyncTrigger",
-        title = "Sync to Notion",
+        title = "NotionSync: Sync Current Book",
         general = true,
     })
 end
@@ -48,28 +85,84 @@ end
 -- =========================================================
 
 function NotionSync:loadConfig()
+    local loaded_anything = false
+
     local file = io.open(self.config_file, "r")
     if file then
         local content = file:read("*a")
         file:close()
         local loaded = json.decode(content)
         if loaded then
-            self.config = loaded
-            if self.config.notion_token and self.config.notion_token ~= "" then
-                self.client = NotionClient:new(self.config)
+            if loaded.database_id ~= nil then
+                self.config.database_id = loaded.database_id or ""
             end
+            if loaded.notion_version ~= nil and loaded.notion_version ~= "" then
+                self.config.notion_version = loaded.notion_version
+            end
+            if loaded.metadata_sync ~= nil then
+                self.config.metadata_sync = loaded.metadata_sync and true or false
+            end
+            if loaded.notion_token ~= nil and loaded.notion_token ~= "" then
+                self.config.notion_token = loaded.notion_token
+            end
+            loaded_anything = true
         end
+    end
+
+    local credentials, cred_err = loadLuaTable(self.credentials_file)
+    if credentials then
+        if credentials.notion_token ~= nil then
+            self.config.notion_token = credentials.notion_token or ""
+        end
+        if credentials.database_id ~= nil then
+            self.config.database_id = credentials.database_id or ""
+        end
+        if credentials.notion_version ~= nil and credentials.notion_version ~= "" then
+            self.config.notion_version = credentials.notion_version
+        end
+        loaded_anything = true
+    elseif cred_err and not tostring(cred_err):match("No such file") then
+        logger.warn("NotionSync: Could not load credentials file: " .. tostring(cred_err))
+    end
+
+    if not loaded_anything then
+        self:saveConfig()
+    end
+
+    if self.config.notion_token and self.config.notion_token ~= "" then
+        self.client = NotionClient:new(self.config)
     end
 end
 
 function NotionSync:saveConfig()
-    local file = io.open(self.config_file, "w")
-    if file then
-        file:write(json.encode(self.config))
-        file:close()
-        self.client = NotionClient:new(self.config)
+    local runtime_file = io.open(self.config_file, "w")
+    if runtime_file then
+        runtime_file:write(json.encode({
+            notion_version = self.config.notion_version or "2022-06-28",
+            metadata_sync = self.config.metadata_sync and true or false
+        }))
+        runtime_file:close()
     else
         self:notify("Error saving config.json")
+        return
+    end
+
+    local credentials_file = io.open(self.credentials_file, "w")
+    if credentials_file then
+        credentials_file:write(string.format(
+            "return {\n    notion_token = %q,\n    database_id = %q,\n    notion_version = %q,\n}\n",
+            self.config.notion_token or "",
+            self.config.database_id or "",
+            self.config.notion_version or "2022-06-28"
+        ))
+        credentials_file:close()
+        if self.config.notion_token and self.config.notion_token ~= "" then
+            self.client = NotionClient:new(self.config)
+        else
+            self.client = nil
+        end
+    else
+        self:notify("Error saving notion_credentials.lua")
     end
 end
 
@@ -83,6 +176,8 @@ function NotionSync:showConfigMenu()
     if self.config.notion_token and self.config.notion_token ~= "" then
         token_info = "Set (Ends in ..." .. self.config.notion_token:sub(-4) .. ")"
     end
+
+    local metadata_info = self.config.metadata_sync and "Enabled" or "Disabled"
 
     local settings_menu -- Forward declaration
     
@@ -102,6 +197,24 @@ function NotionSync:showConfigMenu()
                 callback = function() 
                     self:promptForDatabase(settings_menu) 
                 end
+            },
+            {
+                text = "Metadata Sync",
+                sub_text = metadata_info,
+                callback = function()
+                    self.config.metadata_sync = not self.config.metadata_sync
+                    self:saveConfig()
+                    self:notify("Metadata Sync " .. (self.config.metadata_sync and "Enabled" or "Disabled"))
+                    if settings_menu then UIManager:close(settings_menu) end
+                    self:showConfigMenu()
+                end
+            },
+            {
+                text = "Credentials File",
+                sub_text = self.credentials_file,
+                callback = function()
+                    self:notify(self.credentials_file)
+                end,
             }
         }
     }
@@ -239,6 +352,100 @@ function NotionSync:notify(msg)
     end)
 end
 
+function NotionSync:updateProgressPopup(popup_ref, text)
+    if popup_ref[1] then
+        UIManager:close(popup_ref[1])
+    end
+
+    popup_ref[1] = InfoMessage:new{
+        text = text,
+        timeout = nil,
+    }
+    UIManager:show(popup_ref[1])
+end
+
+function NotionSync:closeProgressPopup(popup_ref)
+    if popup_ref[1] then
+        UIManager:close(popup_ref[1])
+        popup_ref[1] = nil
+    end
+end
+
+function NotionSync:withManagedWifi(sync_func)
+    local popup_ref = { nil }
+    local wifi_enabled_by_plugin = false
+
+    local co = coroutine.create(function()
+        if not NetworkMgr:isOnline() then
+            self:updateProgressPopup(popup_ref, "NotionSync\nTurning Wi-Fi on...")
+            coroutine.yield()
+            wifi_enabled_by_plugin = true
+            local ok = pcall(function()
+                NetworkMgr:enableWifi()
+            end)
+            if not ok then
+                self:closeProgressPopup(popup_ref)
+                self:notify("Failed to turn Wi-Fi on")
+                return
+            end
+
+            local attempts = 0
+            while not NetworkMgr:isOnline() and attempts < 30 do
+                attempts = attempts + 1
+                self:updateProgressPopup(popup_ref, "NotionSync\nWaiting for Wi-Fi...")
+                coroutine.yield()
+            end
+
+            if not NetworkMgr:isOnline() then
+                self:closeProgressPopup(popup_ref)
+                self:notify("Wi-Fi did not come online")
+                return
+            end
+        end
+
+        self:updateProgressPopup(popup_ref, "NotionSync\nPreparing sync...")
+        coroutine.yield()
+
+        local ok, err = pcall(sync_func, popup_ref)
+
+        if wifi_enabled_by_plugin then
+            self:updateProgressPopup(popup_ref, "NotionSync\nTurning Wi-Fi off...")
+            coroutine.yield()
+            pcall(function()
+                if NetworkMgr.disableWifi then
+                    NetworkMgr:disableWifi()
+                elseif NetworkMgr.turnOffWifi then
+                    NetworkMgr:turnOffWifi()
+                elseif NetworkMgr.setWifiState then
+                    NetworkMgr:setWifiState(false)
+                end
+            end)
+        end
+
+        self:closeProgressPopup(popup_ref)
+
+        if not ok then
+            logger.err("NotionSync Managed Sync Crash: " .. tostring(err))
+            self:notify("Crash: " .. tostring(err))
+        end
+    end)
+
+    local function pump()
+        if coroutine.status(co) == "suspended" then
+            local status, res = coroutine.resume(co)
+            if not status then
+                self:closeProgressPopup(popup_ref)
+                logger.err("NotionSync Pump Crash: " .. tostring(res))
+                self:notify("Crash: " .. tostring(res))
+            else
+                UIManager:nextTick(pump)
+            end
+        end
+    end
+
+    UIManager:nextTick(pump)
+end
+
 -- Helper function to calculate progress from document
 local function calculateProgress(doc)
     local progress = 0
@@ -304,6 +511,34 @@ local function calculateProgress(doc)
     return progress
 end
 
+local function loadAnnotationsForPath(file_path)
+    if not file_path then
+        return nil
+    end
+
+    local DocSettings = require("docsettings")
+    local doc_settings = DocSettings:open(file_path)
+    if not doc_settings then
+        return nil
+    end
+
+    local candidates = {
+        "annotations",
+        "highlight",
+        "highlights",
+        "bookmarks",
+    }
+
+    for _, key in ipairs(candidates) do
+        local value = doc_settings:readSetting(key)
+        if type(value) == "table" and next(value) ~= nil then
+            return value
+        end
+    end
+
+    return {}
+end
+
 -- Helper function to sync ONE book (takes doc and annotations)
 function NotionSync:syncOneBook(doc, annotations, yield_func)
     if not doc then 
@@ -363,9 +598,12 @@ function NotionSync:getAllBooks()
     
     -- Extract file paths from history data
     if history_data then
-        for _, item in ipairs(history_data) do
-            if item.file then
-                table.insert(books, item.file)
+        for _, item in pairs(history_data) do
+            local file_path = type(item) == "table" and (item.file or item.path or item.filename) or nil
+            if file_path and file_path ~= "" then
+                table.insert(books, file_path)
+            elseif type(item) == "string" and item ~= "" then
+                table.insert(books, item)
             end
         end
     end
@@ -375,14 +613,6 @@ end
 
 -- Sync current book to notion
 function NotionSync:onSyncRequested()
-
-    -- Enable Wi-Fi if not online
-    if not NetworkMgr:isOnline() then
-        NetworkMgr:enableWifi()
-        return
-    end
-
-    -- Check if plugin is configured
     if not self.client or not self.config.database_id or self.config.database_id == "" then
         self:notify("Plugin not configured. Check settings.")
         self:showConfigMenu()
@@ -397,49 +627,44 @@ function NotionSync:onSyncRequested()
         return
     end
     
+    if (not annotations or next(annotations) == nil) and doc and doc.file then
+        annotations = loadAnnotationsForPath(doc.file)
+    end
+
     if not annotations or next(annotations) == nil then
         self:notify("No annotations found in current book")
         return
     end
 
-    local loading_popup = InfoMessage:new{
-        text = "Syncing highlights to Notion...",
-        timeout = nil,
-    }
-    UIManager:show(loading_popup)
+    self:withManagedWifi(function(popup_ref)
+        self:updateProgressPopup(popup_ref, "NotionSync\nSyncing current book...")
+        coroutine.yield()
 
-    local yield_func = function() coroutine.yield() end
+        local yield_func = function()
+            self:updateProgressPopup(popup_ref, "NotionSync\nSyncing current book...")
+            coroutine.yield()
+        end
 
-    local co = coroutine.create(function()
         local result = self:syncOneBook(doc, annotations, yield_func)
-        if loading_popup then UIManager:close(loading_popup) end
-        
+
         if result.success then
-            coroutine.yield() 
-            self:notify(string.format("Success! New: %d, Updated: %d", result.new, result.updated))
+            self:updateProgressPopup(popup_ref, string.format(
+                "NotionSync\nDone\nNew: %d  Updated: %d",
+                result.new or 0,
+                result.updated or 0
+            ))
+            coroutine.yield()
+            self:notify(string.format("Success! New: %d, Updated: %d", result.new or 0, result.updated or 0))
         else
+            self:updateProgressPopup(popup_ref, "NotionSync\nFailed")
+            coroutine.yield()
             self:notify("Failed: " .. result.msg)
         end
     end)
-
-    local function pump()
-        if coroutine.status(co) == "suspended" then
-            local status, res = coroutine.resume(co)
-            if not status then
-                if loading_popup then UIManager:close(loading_popup) end
-                logger.err("NotionSync Crash: " .. tostring(res))
-                self:notify("Crash: " .. tostring(res))
-            else
-                UIManager:nextTick(pump)
-            end
-        end
-    end
-    UIManager:nextTick(pump)
 end
 
 -- Load document and annotations from file path
 local function loadBookFromPath(file_path)
-    local DocSettings = require("docsettings")
     local DocumentRegistry = require("document/documentregistry")
     
     if not file_path then
@@ -458,13 +683,17 @@ local function loadBookFromPath(file_path)
     
     -- Try to open the document using DocumentRegistry (standard KOReader way)
     pcall(function()
-        if DocumentRegistry then
+        if DocumentRegistry and DocumentRegistry.openDocument then
             doc = DocumentRegistry:openDocument(file_path)
+        elseif DocumentRegistry and DocumentRegistry.open then
+            doc = DocumentRegistry:open(file_path)
         else
             -- Fallback: try direct Document require
             local Document = require("document/document")
             if Document and Document.openDocument then
                 doc = Document.openDocument(file_path)
+            elseif Document and Document.new then
+                doc = Document:new{ file = file_path }
             end
         end
         
@@ -479,33 +708,13 @@ local function loadBookFromPath(file_path)
         end
     end)
     
-    -- Load annotations from sidecar file
-    local doc_settings = DocSettings:open(file_path)
-    if doc_settings then
-        annotations = doc_settings:readSetting("annotations") or {}
-        -- Also try to get from UI.annotation structure if available
-        if not annotations or next(annotations) == nil then
-            -- Try alternative annotation locations
-            local alt_annotations = doc_settings:readSetting("highlight") or {}
-            if next(alt_annotations) ~= nil then
-                annotations = alt_annotations
-            end
-        end
-    end
+    annotations = loadAnnotationsForPath(file_path)
     
     return doc, annotations
 end
 
 -- Sync all books to Notion
 function NotionSync:onSyncAllBooksRequested()
-
-    -- Enable Wi-Fi if not online
-    if not NetworkMgr:isOnline() then
-        NetworkMgr:enableWifi()
-        return
-    end
-
-    -- Check if plugin is configured
     if not self.client or not self.config.database_id or self.config.database_id == "" then
         self:notify("Plugin not configured. Check settings.")
         self:showConfigMenu()
@@ -520,40 +729,37 @@ function NotionSync:onSyncAllBooksRequested()
         return
     end
 
-    local progress_popup = InfoMessage:new{
-        text = string.format("Syncing all books: 0/%d", #books),
-        timeout = nil,
-    }
-    UIManager:show(progress_popup)
-
-    local yield_func = function() coroutine.yield() end
-
-    local co = coroutine.create(function()
-        coroutine.yield()  -- Allow popup to show
-        
+    self:withManagedWifi(function(popup_ref)
         local total_success = 0
         local total_new = 0
         local total_updated = 0
         local total_failed = 0
-        
+
         for i, book_path in ipairs(books) do
-            -- Update progress popup by closing and recreating
             local book_name = book_path:match("([^/]+)$") or book_path
-            if progress_popup then UIManager:close(progress_popup) end
-            progress_popup = InfoMessage:new{
-                text = string.format("Syncing all books: %d/%d\n%s", i, #books, book_name),
-                timeout = nil,
-            }
-            UIManager:show(progress_popup)
-            coroutine.yield()  -- Allow UI to update
-            
-            -- Load document and annotations
+            self:updateProgressPopup(popup_ref, string.format(
+                "NotionSync\nSyncing all books: %d/%d\n%s",
+                i,
+                #books,
+                book_name
+            ))
+            coroutine.yield()
+
             local doc, annotations = loadBookFromPath(book_path)
-            
+
             if doc and annotations and next(annotations) ~= nil then
-                -- Sync this book
+                local yield_func = function()
+                    self:updateProgressPopup(popup_ref, string.format(
+                        "NotionSync\nSyncing all books: %d/%d\n%s",
+                        i,
+                        #books,
+                        book_name
+                    ))
+                    coroutine.yield()
+                end
+
                 local result = self:syncOneBook(doc, annotations, yield_func)
-                
+
                 if result.success then
                     total_success = total_success + 1
                     total_new = total_new + (result.new or 0)
@@ -563,44 +769,30 @@ function NotionSync:onSyncAllBooksRequested()
                     logger.warn("NotionSync: Failed to sync " .. book_name .. ": " .. tostring(result.msg))
                 end
             else
-                -- Skip books without annotations
                 logger.info("NotionSync: Skipping " .. book_name .. " (no annotations)")
             end
-            
-            -- Close document to free memory
+
             if doc then
                 pcall(function()
-                    doc:closeDocument()
+                    if doc.closeDocument then
+                        doc:closeDocument()
+                    elseif doc.close then
+                        doc:close()
+                    end
                 end)
             end
         end
-        
-        -- Close progress popup
-        if progress_popup then UIManager:close(progress_popup) end
-        
-        -- Show final summary
-        coroutine.yield()
-        local summary = string.format("Sync complete!\nBooks: %d/%d\nNew: %d, Updated: %d", 
-            total_success+1, #books, total_new, total_updated)
+
+        local summary = string.format("Sync complete!\nBooks: %d/%d\nNew: %d, Updated: %d",
+            total_success, #books, total_new, total_updated)
         if total_failed > 0 then
             summary = summary .. string.format("\nFailed: %d", total_failed)
         end
+
+        self:updateProgressPopup(popup_ref, "NotionSync\n" .. summary)
+        coroutine.yield()
         self:notify(summary)
     end)
-
-    local function pump()
-        if coroutine.status(co) == "suspended" then
-            local status, res = coroutine.resume(co)
-            if not status then
-                if progress_popup then UIManager:close(progress_popup) end
-                logger.err("NotionSync All Books Crash: " .. tostring(res))
-                self:notify("Crash: " .. tostring(res))
-            else
-                UIManager:nextTick(pump)
-            end
-        end
-    end
-    UIManager:nextTick(pump)
 end
 
 return NotionSync

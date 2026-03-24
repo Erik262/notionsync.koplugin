@@ -4,14 +4,43 @@ local json = require("json")
 local logger = require("custom_logger")
 
 local NotionClient = {}
+local MAX_NOTION_TEXT_LENGTH = 2000
+
+local function resolveNotionVersion(config)
+    if config and config.notion_version and config.notion_version ~= "" then
+        return config.notion_version
+    end
+    return "2022-06-28"
+end
+
+local function sanitizeTextValue(value, fallback)
+    local text = tostring(value or "")
+    text = text:gsub("\r\n", " "):gsub("\n", " "):gsub("%s+", " ")
+    text = text:match("^%s*(.-)%s*$") or ""
+
+    if text == "" then
+        text = fallback or ""
+    end
+    if #text > MAX_NOTION_TEXT_LENGTH then
+        text = text:sub(1, MAX_NOTION_TEXT_LENGTH)
+    end
+
+    return text
+end
 
 function NotionClient:new(config)
     local o = {
         token = config.notion_token,
         database_id = config.database_id,
-        version = "2022-06-28",
+        version = resolveNotionVersion(config),
         api_url = "https://api.notion.com/v1",
-        TIMEOUT = 10
+        TIMEOUT = 10,
+        config = config,
+        cache = {
+            databases = {},
+            pages = {},
+            missing_pages = {},
+        }
     }
     setmetatable(o, self)
     self.__index = self
@@ -82,22 +111,44 @@ function NotionClient:listDatabases()
 end
 
 function NotionClient:getDatabase(database_id)
-    return self:request("GET", "/databases/" .. database_id)
+    if self.cache.databases[database_id] then
+        return self.cache.databases[database_id]
+    end
+
+    local res, err = self:request("GET", "/databases/" .. database_id)
+    if res then
+        self.cache.databases[database_id] = res
+    end
+    return res, err
 end
 
 function NotionClient:findPage(title)
     if not self.database_id then return nil, "No Database Selected" end
-    local query = { filter = { property = "Name", title = { equals = title } } }
+    local safe_title = sanitizeTextValue(title, "Unknown Title")
+    if self.cache.pages[safe_title] ~= nil then
+        return self.cache.pages[safe_title]
+    end
+    if self.cache.missing_pages[safe_title] then
+        return nil
+    end
+
+    local query = { filter = { property = "Name", title = { equals = safe_title } } }
     local res, err = self:request("POST", "/databases/" .. self.database_id .. "/query", query)
     if not res then return nil, err end
-    if res.results and #res.results > 0 then return res.results[1] end
+    if res.results and #res.results > 0 then
+        self.cache.pages[safe_title] = res.results[1]
+        self.cache.missing_pages[safe_title] = nil
+        return res.results[1]
+    end
+    self.cache.missing_pages[safe_title] = true
     return nil
 end
 
 function NotionClient:createPage(title, extra_props)
     if not self.database_id then return nil, "No Database Selected" end
+    local safe_title = sanitizeTextValue(title, "Unknown Title")
     local properties = {
-        Name = { title = {{ text = { content = title } }} }
+        Name = { title = {{ text = { content = safe_title } }} }
     }
     
     -- Merge extra properties (ISBN, Author, Progress, etc)
@@ -111,7 +162,12 @@ function NotionClient:createPage(title, extra_props)
         parent = { database_id = self.database_id },
         properties = properties
     }
-    return self:request("POST", "/pages", body)
+    local res, err = self:request("POST", "/pages", body)
+    if res then
+        self.cache.pages[safe_title] = res
+        self.cache.missing_pages[safe_title] = nil
+    end
+    return res, err
 end
 
 function NotionClient:updatePageProperties(page_id, properties)

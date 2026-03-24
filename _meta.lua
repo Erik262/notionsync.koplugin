@@ -9,7 +9,7 @@ return {
     description = "Sync your book highlights and notes to Notion databases",
     
     -- Plugin version
-    version = "1.0.0",
+    version = "1.0.1",
     
     -- Author information
     author = {
@@ -29,9 +29,6 @@ return {
     -- Plugin file structure
     main_file = "main.lua",
     
-    -- Plugin configuration file
-    config_file = "plugins/notionsync.koplugin/config.json",
-    
     -- Plugin capabilities
     capabilities = {
         "sync",
@@ -39,22 +36,6 @@ return {
         "highlight_export"
     },
     
-    -- Plugin settings
-    settings = {
-        {
-            key = "notion_token",
-            name = "Notion Integration Token",
-            description = "Your Notion API integration token",
-            type = "string",
-            required = true,
-            secret = true
-        },
-        {
-            key = "database_id",
-            name = "Notion Database ID",
-            description = "The ID of your Notion database",
-            type = "string",
-            required = true
-        }
-    }
+    -- NotionSync keeps its settings in the plugin menu and local credentials file.
+    settings = {}
 }

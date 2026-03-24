@@ -1,8 +1,16 @@
 local logger = require("logger") -- Keep system logger for redundancy
 
 local CustomLogger = {}
--- Log file will be created in the KOReader running directory (usually next to koreader.sh or standard output dir)
-local LOG_FILE = "notion_debug.log"
+
+local function getPluginDir()
+    local source = debug.getinfo(1, "S").source or ""
+    if source:sub(1, 1) == "@" then
+        source = source:sub(2)
+    end
+    return source:match("^(.*)/[^/]+$") or "."
+end
+
+local LOG_FILE = getPluginDir() .. "/notion_debug.log"
 
 local function append_to_file(level, msg)
     local f = io.open(LOG_FILE, "a")

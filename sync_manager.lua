@@ -91,17 +91,23 @@ function SyncManager.sync(client, payload, notify_func, yield_func)
     local page, err = client:findPage(title)
     if not page and err then return { success = false, msg = tostring(err) } end
 
+    local metadata_sync = true
+    if client.config and client.config.metadata_sync ~= nil then
+        metadata_sync = client.config.metadata_sync and true or false
+    end
+
     -- Fetch Database Schema to see which properties exist (Optional handling)
-    local db_schema, db_err = client:getDatabase(client.database_id)
     local valid_props = {}
-    if db_schema and db_schema.properties then
-        valid_props = db_schema.properties
-        -- DEBUG LOGGING: Print available properties in DB
-        local props_list = ""
-        for k, _ in pairs(valid_props) do props_list = props_list .. "'" .. k .. "', " end
-        logger.info("NotionSync DB Columns: " .. props_list)
-    else
-        logger.warn("NotionSync: Could not fetch DB schema: " .. tostring(db_err))
+    if metadata_sync then
+        local db_schema, db_err = client:getDatabase(client.database_id)
+        if db_schema and db_schema.properties then
+            valid_props = db_schema.properties
+            local props_list = ""
+            for k, _ in pairs(valid_props) do props_list = props_list .. "'" .. k .. "', " end
+            logger.info("NotionSync DB Columns: " .. props_list)
+        else
+            logger.warn("NotionSync: Could not fetch DB schema: " .. tostring(db_err))
+        end
     end
     
     -- Helper: Case-insensitive lookup
@@ -159,34 +165,36 @@ function SyncManager.sync(client, payload, notify_func, yield_func)
         return nil -- Unsupported type
     end
 
-    local key_author = getRealPropName("Authors") or getRealPropName("Author")
-    if payload.author and key_author then
-        extra_props[key_author] = formatValue(key_author, valid_props[key_author].type, payload.author)
-    end
-    
-    local key_isbn = getRealPropName("ISBN")
-    if payload.isbn and key_isbn then
-        extra_props[key_isbn] = formatValue(key_isbn, valid_props[key_isbn].type, payload.isbn)
-    end
-    
-    local key_progress = getRealPropName("Progress")
-    if payload.progress and key_progress then
-        extra_props[key_progress] = formatValue(key_progress, valid_props[key_progress].type, payload.progress)
-    end
-    
-    local key_language = getRealPropName("Language")
-    if payload.language and key_language then
-        extra_props[key_language] = formatValue(key_language, valid_props[key_language].type, payload.language)
-    end
-    
-    local key_pages = getRealPropName("Pages")
-    if payload.pages and payload.pages > 0 and key_pages then
-        extra_props[key_pages] = formatValue(key_pages, valid_props[key_pages].type, payload.pages)
-    end
-    
-    local key_start = getRealPropName("Start Reading")
-    if payload.start_date and key_start then
-        extra_props[key_start] = formatValue(key_start, valid_props[key_start].type, payload.start_date)
+    if metadata_sync then
+        local key_author = getRealPropName("Authors") or getRealPropName("Author")
+        if payload.author and key_author then
+            extra_props[key_author] = formatValue(key_author, valid_props[key_author].type, payload.author)
+        end
+        
+        local key_isbn = getRealPropName("ISBN")
+        if payload.isbn and key_isbn then
+            extra_props[key_isbn] = formatValue(key_isbn, valid_props[key_isbn].type, payload.isbn)
+        end
+        
+        local key_progress = getRealPropName("Progress")
+        if payload.progress and key_progress then
+            extra_props[key_progress] = formatValue(key_progress, valid_props[key_progress].type, payload.progress)
+        end
+        
+        local key_language = getRealPropName("Language")
+        if payload.language and key_language then
+            extra_props[key_language] = formatValue(key_language, valid_props[key_language].type, payload.language)
+        end
+        
+        local key_pages = getRealPropName("Pages")
+        if payload.pages and payload.pages > 0 and key_pages then
+            extra_props[key_pages] = formatValue(key_pages, valid_props[key_pages].type, payload.pages)
+        end
+        
+        local key_start = getRealPropName("Start Reading")
+        if payload.start_date and key_start then
+            extra_props[key_start] = formatValue(key_start, valid_props[key_start].type, payload.start_date)
+        end
     end
 
     -- DEBUG: Log the full JSON payload
