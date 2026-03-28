@@ -21,6 +21,10 @@ local function is_newer_than_last_successful_sync(book_state, updated_at)
     return updated_at ~= nil and updated_at > last_sync
 end
 
+local function requires_remote_scan(book_state, highlights)
+    return not has_known_highlight_mapping(book_state) and #((highlights or {})) > 0
+end
+
 function SyncDecision.plan(book_state, highlights)
     local pending_highlights = {}
     local has_mapping = has_known_highlight_mapping(book_state)
@@ -34,7 +38,7 @@ function SyncDecision.plan(book_state, highlights)
 
     return {
         use_cached_page_id = has_cached_page_id(book_state),
-        needs_remote_scan = #pending_highlights > 0 and not has_mapping,
+        needs_remote_scan = requires_remote_scan(book_state, highlights),
         pending_highlights = pending_highlights,
     }
 end
