@@ -10,7 +10,8 @@
 - **Rich Formatting**: Highlights are formatted into blocks including page number, chapter, date, your notes and a hidden link to the highlight anchor.
 - **Rich Metadata Sync**: Automatically fills in book info like authors, ISBN, reading progress, language, pages, and start date (if those columns exist in selected database).
 - **Optional Metadata Sync**: Metadata updates can be disabled from the NotionSync settings menu if you only want highlight content.
-- **Visible Sync Status**: The plugin shows status popups while it prepares the sync, waits for Wi-Fi, syncs content, and finishes.
+- **Visible Sync Status**: The plugin shows a persistent sync progress dialog with current stage, current book, and running counters.
+- **Local Sync State Cache**: Per-book sync state is stored locally to reuse known Notion page IDs and skip unnecessary remote scans when possible.
 - **Managed Wi-Fi**: If Wi-Fi is off, NotionSync can turn it on for the sync and turn it off again afterward.
 - **One-Click Sync**: You can asign the sync as gesture (for example as corner click) to quickly sync your highlights.
 - **Bulk Sync Without Opening Books**: Sync all books from KOReader history that have saved annotations, without opening each one manually.
@@ -58,6 +59,7 @@ Create a Notion Database with the following columns. **All metadata columns are 
 
 - `notion_credentials.lua`: editable credentials file for `notion_token`, `database_id`, and `notion_version`.
 - `config.json`: runtime plugin settings only, such as `metadata_sync`. Credentials are no longer stored here by default.
+- `sync_state.lua`: local per-book sync cache used to speed up repeat syncs.
 
 ## Usage
 
@@ -66,7 +68,7 @@ Create a Notion Database with the following columns. **All metadata columns are 
 2. Go to **Tools Menu**.
 3. Tap **NotionSync > Sync Highlights to Notion**.
 
-When started from the menu or gesture, the plugin now shows progress popups such as preparing, waiting for Wi-Fi, syncing, and finishing.
+When started from the menu or gesture, the plugin now shows a persistent sync dialog with the current stage, the current book, and running new/updated/failed counters.
 
 ### Sync all books
 
@@ -81,6 +83,8 @@ You can sync all books from your KOReader history that contain highlights withou
 You can assign **NotionSync: Sync Current Book** to a tap gesture in **Settings -> Taps and gestures -> Gesture manager**. This action only syncs the book that is currently open.
 
 If Wi-Fi is currently off, the plugin will try to turn it on, perform the sync, and turn it off again when the sync finishes.
+
+Bulk sync now pre-filters history entries to books that actually have saved annotations before the main sync loop starts, so the progress display reflects real work instead of raw history length.
 
 ## Known Issues
 

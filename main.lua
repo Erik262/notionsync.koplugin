@@ -12,6 +12,8 @@ local Menus = require("menus")
 local GetHighlights = require("get_highlights")
 local NotionClient = require("notion_client")
 local SyncManager = require("sync_manager")
+local SyncProgressDialog = require("sync_progress_dialog")
+local SyncStateStore = require("sync_state_store")
 
 local function getPluginDir()
     local source = debug.getinfo(1, "S").source or ""
@@ -54,15 +56,19 @@ local NotionSync = WidgetContainer:new{
     client = nil,
     plugin_dir = nil,
     config_file = nil,
-    credentials_file = nil
+    credentials_file = nil,
+    sync_state_file = nil,
+    sync_state = nil,
 }
 
 function NotionSync:init()
     self.plugin_dir = getPluginDir()
     self.config_file = joinPath(self.plugin_dir, "config.json")
     self.credentials_file = joinPath(self.plugin_dir, "notion_credentials.lua")
+    self.sync_state_file = joinPath(self.plugin_dir, "sync_state.lua")
     self.ui.menu:registerToMainMenu(self)
     self:loadConfig()
+    self:loadSyncState()
 
     Dispatcher:registerAction("notionsync_current_book", {
         category = "none",
@@ -163,6 +169,41 @@ function NotionSync:saveConfig()
         end
     else
         self:notify("Error saving notion_credentials.lua")
+    end
+end
+
+function NotionSync:loadSyncState()
+    local state, err = SyncStateStore.load(self.sync_state_file)
+    if not state then
+        logger.warn("NotionSync: Could not load sync state: " .. tostring(err))
+        self.sync_state = { books = {} }
+        return
+    end
+
+    state.books = state.books or {}
+    self.sync_state = state
+end
+
+function NotionSync:getBookSyncState(file_path)
+    if not file_path or not self.sync_state or type(self.sync_state.books) ~= "table" then
+        return nil
+    end
+
+    return self.sync_state.books[file_path]
+end
+
+function NotionSync:saveBookSyncState(file_path, book_state)
+    if not file_path or not book_state then
+        return
+    end
+
+    self.sync_state = self.sync_state or {}
+    self.sync_state.books = self.sync_state.books or {}
+    self.sync_state.books[file_path] = book_state
+
+    local ok, err = SyncStateStore.save(self.sync_state_file, self.sync_state)
+    if not ok then
+        logger.warn("NotionSync: Could not save sync state: " .. tostring(err))
     end
 end
 
@@ -352,39 +393,74 @@ function NotionSync:notify(msg)
     end)
 end
 
-function NotionSync:updateProgressPopup(popup_ref, text)
-    if popup_ref[1] then
-        UIManager:close(popup_ref[1])
+local function buildProgressMessage(state)
+    local lines = {
+        state.title or "NotionSync",
+        state.stage_label or "Working...",
+    }
+
+    if state.progress_total ~= nil then
+        table.insert(lines, string.format("%d/%d", state.progress_current or 0, state.progress_total))
     end
 
-    popup_ref[1] = InfoMessage:new{
-        text = text,
+    if state.detail_text and state.detail_text ~= "" then
+        table.insert(lines, state.detail_text)
+    end
+
+    local count_line = string.format(
+        "New: %d  Updated: %d  Failed: %d",
+        state.new_count or 0,
+        state.updated_count or 0,
+        state.failed_count or 0
+    )
+    table.insert(lines, count_line)
+
+    return table.concat(lines, "\n")
+end
+
+function NotionSync:updateProgressPopup(dialog_ref, dialog_input)
+    local state = SyncProgressDialog.buildState(dialog_input)
+
+    if dialog_ref[1] then
+        UIManager:close(dialog_ref[1])
+    end
+
+    dialog_ref[1] = InfoMessage:new{
+        text = buildProgressMessage(state),
         timeout = nil,
     }
-    UIManager:show(popup_ref[1])
+    UIManager:show(dialog_ref[1])
 end
 
-function NotionSync:closeProgressPopup(popup_ref)
-    if popup_ref[1] then
-        UIManager:close(popup_ref[1])
-        popup_ref[1] = nil
+function NotionSync:closeProgressPopup(dialog_ref)
+    if dialog_ref[1] then
+        UIManager:close(dialog_ref[1])
+        dialog_ref[1] = nil
     end
 end
 
-function NotionSync:withManagedWifi(sync_func)
-    local popup_ref = { nil }
+function NotionSync:withManagedWifi(sync_mode, sync_func)
+    if type(sync_mode) == "function" then
+        sync_func = sync_mode
+        sync_mode = "bulk"
+    end
+
+    local dialog_ref = { nil }
     local wifi_enabled_by_plugin = false
 
     local co = coroutine.create(function()
         if not NetworkMgr:isOnline() then
-            self:updateProgressPopup(popup_ref, "NotionSync\nTurning Wi-Fi on...")
+            self:updateProgressPopup(dialog_ref, {
+                mode = sync_mode,
+                stage = "enabling_wifi",
+            })
             coroutine.yield()
             wifi_enabled_by_plugin = true
             local ok = pcall(function()
                 NetworkMgr:enableWifi()
             end)
             if not ok then
-                self:closeProgressPopup(popup_ref)
+                self:closeProgressPopup(dialog_ref)
                 self:notify("Failed to turn Wi-Fi on")
                 return
             end
@@ -392,24 +468,33 @@ function NotionSync:withManagedWifi(sync_func)
             local attempts = 0
             while not NetworkMgr:isOnline() and attempts < 30 do
                 attempts = attempts + 1
-                self:updateProgressPopup(popup_ref, "NotionSync\nWaiting for Wi-Fi...")
+                self:updateProgressPopup(dialog_ref, {
+                    mode = sync_mode,
+                    stage = "waiting_for_wifi",
+                })
                 coroutine.yield()
             end
 
             if not NetworkMgr:isOnline() then
-                self:closeProgressPopup(popup_ref)
+                self:closeProgressPopup(dialog_ref)
                 self:notify("Wi-Fi did not come online")
                 return
             end
         end
 
-        self:updateProgressPopup(popup_ref, "NotionSync\nPreparing sync...")
+        self:updateProgressPopup(dialog_ref, {
+            mode = sync_mode,
+            stage = "preparing",
+        })
         coroutine.yield()
 
-        local ok, err = pcall(sync_func, popup_ref)
+        local ok, err = pcall(sync_func, dialog_ref)
 
         if wifi_enabled_by_plugin then
-            self:updateProgressPopup(popup_ref, "NotionSync\nTurning Wi-Fi off...")
+            self:updateProgressPopup(dialog_ref, {
+                mode = sync_mode,
+                stage = "disabling_wifi",
+            })
             coroutine.yield()
             pcall(function()
                 if NetworkMgr.disableWifi then
@@ -422,7 +507,7 @@ function NotionSync:withManagedWifi(sync_func)
             end)
         end
 
-        self:closeProgressPopup(popup_ref)
+        self:closeProgressPopup(dialog_ref)
 
         if not ok then
             logger.err("NotionSync Managed Sync Crash: " .. tostring(err))
@@ -434,7 +519,7 @@ function NotionSync:withManagedWifi(sync_func)
         if coroutine.status(co) == "suspended" then
             local status, res = coroutine.resume(co)
             if not status then
-                self:closeProgressPopup(popup_ref)
+                self:closeProgressPopup(dialog_ref)
                 logger.err("NotionSync Pump Crash: " .. tostring(res))
                 self:notify("Crash: " .. tostring(res))
             else
@@ -553,7 +638,18 @@ function NotionSync:syncOneBook(doc, annotations, yield_func)
 
     payload.progress = calculateProgress(doc)
 
-    local result = SyncManager.sync(self.client, payload, nil, yield_func)
+    local result = SyncManager.sync(
+        self.client,
+        payload,
+        nil,
+        yield_func,
+        self:getBookSyncState(doc.file)
+    )
+
+    if result and result.success and result.next_state then
+        self:saveBookSyncState(doc.file, result.next_state)
+    end
+
     return result
 end
 
@@ -636,27 +732,51 @@ function NotionSync:onSyncRequested()
         return
     end
 
-    self:withManagedWifi(function(popup_ref)
-        self:updateProgressPopup(popup_ref, "NotionSync\nSyncing current book...")
+    self:withManagedWifi("single", function(dialog_ref)
+        self:updateProgressPopup(dialog_ref, {
+            mode = "single",
+            stage = "syncing_changes",
+            completed_books = 0,
+            total_books = 0,
+            current_book = doc.file and (doc.file:match("([^/]+)$") or doc.file) or "",
+        })
         coroutine.yield()
 
         local yield_func = function()
-            self:updateProgressPopup(popup_ref, "NotionSync\nSyncing current book...")
+            self:updateProgressPopup(dialog_ref, {
+                mode = "single",
+                stage = "syncing_changes",
+                completed_books = 0,
+                total_books = 0,
+                current_book = doc.file and (doc.file:match("([^/]+)$") or doc.file) or "",
+            })
             coroutine.yield()
         end
 
         local result = self:syncOneBook(doc, annotations, yield_func)
 
         if result.success then
-            self:updateProgressPopup(popup_ref, string.format(
-                "NotionSync\nDone\nNew: %d  Updated: %d",
-                result.new or 0,
-                result.updated or 0
-            ))
+            self:updateProgressPopup(dialog_ref, {
+                mode = "single",
+                stage = "complete",
+                completed_books = 0,
+                total_books = 0,
+                current_book = doc.file and (doc.file:match("([^/]+)$") or doc.file) or "",
+                new_count = result.new or 0,
+                updated_count = result.updated or 0,
+                failed_count = 0,
+            })
             coroutine.yield()
             self:notify(string.format("Success! New: %d, Updated: %d", result.new or 0, result.updated or 0))
         else
-            self:updateProgressPopup(popup_ref, "NotionSync\nFailed")
+            self:updateProgressPopup(dialog_ref, {
+                mode = "single",
+                stage = "failed",
+                completed_books = 0,
+                total_books = 0,
+                current_book = doc.file and (doc.file:match("([^/]+)$") or doc.file) or "",
+                failed_count = 1,
+            })
             coroutine.yield()
             self:notify("Failed: " .. result.msg)
         end
@@ -721,15 +841,21 @@ function NotionSync:onSyncAllBooksRequested()
         return
     end
 
-    -- Get all books
-    local books = self:getAllBooks()
+    -- Get all books and pre-filter to actual sync candidates.
+    local books = {}
+    for _, book_path in ipairs(self:getAllBooks()) do
+        local annotations = loadAnnotationsForPath(book_path)
+        if annotations and next(annotations) ~= nil then
+            table.insert(books, book_path)
+        end
+    end
     
     if #books == 0 then
         self:notify("No books found to sync")
         return
     end
 
-    self:withManagedWifi(function(popup_ref)
+    self:withManagedWifi("bulk", function(dialog_ref)
         local total_success = 0
         local total_new = 0
         local total_updated = 0
@@ -737,24 +863,32 @@ function NotionSync:onSyncAllBooksRequested()
 
         for i, book_path in ipairs(books) do
             local book_name = book_path:match("([^/]+)$") or book_path
-            self:updateProgressPopup(popup_ref, string.format(
-                "NotionSync\nSyncing all books: %d/%d\n%s",
-                i,
-                #books,
-                book_name
-            ))
+            self:updateProgressPopup(dialog_ref, {
+                mode = "bulk",
+                stage = "syncing_changes",
+                completed_books = i - 1,
+                total_books = #books,
+                current_book = book_name,
+                new_count = total_new,
+                updated_count = total_updated,
+                failed_count = total_failed,
+            })
             coroutine.yield()
 
             local doc, annotations = loadBookFromPath(book_path)
 
             if doc and annotations and next(annotations) ~= nil then
                 local yield_func = function()
-                    self:updateProgressPopup(popup_ref, string.format(
-                        "NotionSync\nSyncing all books: %d/%d\n%s",
-                        i,
-                        #books,
-                        book_name
-                    ))
+                    self:updateProgressPopup(dialog_ref, {
+                        mode = "bulk",
+                        stage = "syncing_changes",
+                        completed_books = i - 1,
+                        total_books = #books,
+                        current_book = book_name,
+                        new_count = total_new,
+                        updated_count = total_updated,
+                        failed_count = total_failed,
+                    })
                     coroutine.yield()
                 end
 
@@ -789,7 +923,16 @@ function NotionSync:onSyncAllBooksRequested()
             summary = summary .. string.format("\nFailed: %d", total_failed)
         end
 
-        self:updateProgressPopup(popup_ref, "NotionSync\n" .. summary)
+        self:updateProgressPopup(dialog_ref, {
+            mode = "bulk",
+            stage = "complete",
+            completed_books = #books,
+            total_books = #books,
+            current_book = "",
+            new_count = total_new,
+            updated_count = total_updated,
+            failed_count = total_failed,
+        })
         coroutine.yield()
         self:notify(summary)
     end)

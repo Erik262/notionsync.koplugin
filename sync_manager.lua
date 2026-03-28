@@ -1,4 +1,5 @@
 local logger = require("custom_logger")
+local SyncDecision = require("sync_decision")
 
 local SyncManager = {}
 
@@ -82,13 +83,40 @@ local function extractIdFromBlock(block)
     return nil
 end
 
-function SyncManager.sync(client, payload, notify_func, yield_func)
+local function cloneIdMap(source)
+    local clone = {}
+    if type(source) ~= "table" then
+        return clone
+    end
+
+    for key, value in pairs(source) do
+        clone[key] = value
+    end
+
+    return clone
+end
+
+local function loadPage(client, title, book_state)
+    if book_state and book_state.page_id and book_state.page_id ~= "" then
+        local cached_page, cached_err = client:request("GET", "/pages/" .. book_state.page_id)
+        if cached_page then
+            return cached_page, nil
+        end
+
+        logger.warn("NotionSync: Cached page lookup failed, falling back to title lookup: " .. tostring(cached_err))
+    end
+
+    return client:findPage(title)
+end
+
+function SyncManager.sync(client, payload, notify_func, yield_func, book_state)
+    book_state = book_state or {}
     local title = payload.title
     logger.info("NotionSync: " .. title)
     if yield_func then yield_func() end
 
     -- Find/Create Page
-    local page, err = client:findPage(title)
+    local page, err = loadPage(client, title, book_state)
     if not page and err then return { success = false, msg = tostring(err) } end
 
     local metadata_sync = true
@@ -204,7 +232,7 @@ function SyncManager.sync(client, payload, notify_func, yield_func)
     end)
 
     local page_id
-    local last_sync_raw = nil
+    local last_sync_raw = book_state.last_successful_sync
     if page then
         page_id = page.id
         if page.properties["Last Sync"] and page.properties["Last Sync"].rich_text and #page.properties["Last Sync"].rich_text > 0 then
@@ -222,21 +250,36 @@ function SyncManager.sync(client, payload, notify_func, yield_func)
     end
     if yield_func then yield_func() end
 
-    -- Scan Page Blocks (Flat Scan - Much Faster)
-    logger.info("NotionSync: Scanning blocks...")
-    local page_blocks, bl_err = client:getBlockChildren(page_id)
-    if not page_blocks then return { success = false, msg = tostring(bl_err) } end
-
-    local existing_ids = {} 
-    for _, block in ipairs(page_blocks) do
-        local hid = extractIdFromBlock(block)
-        if hid then existing_ids[hid] = block.id end
-    end
-    
-    if yield_func then yield_func() end
-
     -- Process Highlights
     local last_sync_clean = cleanDate(last_sync_raw) or "1970-01-01T00:00:00"
+    local decision = SyncDecision.plan(book_state, payload.highlights)
+    local existing_ids = cloneIdMap(book_state.known_highlight_ids)
+    local needs_remote_scan = decision.needs_remote_scan
+
+    if not needs_remote_scan then
+        for _, highlight in ipairs(decision.pending_highlights or {}) do
+            local mapped_id = existing_ids[highlight.id]
+            if mapped_id == nil or mapped_id == true then
+                needs_remote_scan = true
+                break
+            end
+        end
+    end
+
+    if needs_remote_scan then
+        logger.info("NotionSync: Scanning blocks...")
+        local page_blocks, bl_err = client:getBlockChildren(page_id)
+        if not page_blocks then return { success = false, msg = tostring(bl_err) } end
+
+        existing_ids = {}
+        for _, block in ipairs(page_blocks) do
+            local hid = extractIdFromBlock(block)
+            if hid then existing_ids[hid] = block.id end
+        end
+
+        if yield_func then yield_func() end
+    end
+
     local max_updated_at = last_sync_clean
     local count_new = 0
     local count_updated = 0
@@ -276,8 +319,25 @@ function SyncManager.sync(client, payload, notify_func, yield_func)
             local sub = {}
             for k=i, math.min(i+chunk-1, #batch_append) do table.insert(sub, batch_append[k]) end
             
-            local _, append_err = client:appendBlockChildren(page_id, sub)
+            local append_res, append_err = client:appendBlockChildren(page_id, sub)
             if append_err then return { success = false, msg = tostring(append_err) } end
+
+            if append_res and append_res.results then
+                for offset, block in ipairs(append_res.results) do
+                    local original = sub[offset]
+                    local hid = extractIdFromBlock(original)
+                    if hid and block and block.id then
+                        existing_ids[hid] = block.id
+                    end
+                end
+            else
+                for _, block in ipairs(sub) do
+                    local hid = extractIdFromBlock(block)
+                    if hid then
+                        existing_ids[hid] = existing_ids[hid] or true
+                    end
+                end
+            end
             
             if yield_func then yield_func() end
         end
@@ -288,7 +348,16 @@ function SyncManager.sync(client, payload, notify_func, yield_func)
         client:updateLastSync(page_id, max_updated_at)
     end
 
-    return { success = true, new = count_new, updated = count_updated }
+    return {
+        success = true,
+        new = count_new,
+        updated = count_updated,
+        next_state = {
+            page_id = page_id,
+            last_successful_sync = max_updated_at,
+            known_highlight_ids = existing_ids,
+        }
+    }
 end
 
 return SyncManager

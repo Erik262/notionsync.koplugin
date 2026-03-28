@@ -9,7 +9,7 @@ local function has_known_highlight_mapping(book_state)
 end
 
 local function is_known_highlight(book_state, highlight_id)
-    return has_known_highlight_mapping(book_state) and book_state.known_highlight_ids[highlight_id] == true
+    return has_known_highlight_mapping(book_state) and book_state.known_highlight_ids[highlight_id] ~= nil
 end
 
 local function is_newer_than_last_successful_sync(book_state, updated_at)
