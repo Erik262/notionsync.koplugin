@@ -3,11 +3,20 @@ local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
 local Menu = require("ui/widget/menu")
-local logger = require("custom_logger")
 local json = require("json")
 local NetworkMgr = require("ui/network/manager")
 local Dispatcher = require("dispatcher")
 
+-- Force-reload plugin-local modules so that Lua's global require() cache
+-- cannot serve a stale or wrong version from another plugin.
+for _, name in ipairs({
+    "custom_logger", "menus", "get_highlights", "notion_client",
+    "sync_manager", "sync_progress_dialog", "sync_state_store", "sync_decision",
+}) do
+    package.loaded[name] = nil
+end
+
+local logger = require("custom_logger")
 local Menus = require("menus")
 local GetHighlights = require("get_highlights")
 local NotionClient = require("notion_client")
@@ -66,6 +75,13 @@ function NotionSync:init()
     self.config_file = joinPath(self.plugin_dir, "config.json")
     self.credentials_file = joinPath(self.plugin_dir, "notion_credentials.lua")
     self.sync_state_file = joinPath(self.plugin_dir, "sync_state.lua")
+
+    -- Diagnostic: write a marker file so we can confirm this code version ran
+    pcall(function()
+        local f = io.open(joinPath(self.plugin_dir, "LOADED_OK"), "w")
+        if f then f:write(os.date("%Y-%m-%d %H:%M:%S")); f:close() end
+    end)
+
     self.ui.menu:registerToMainMenu(self)
     self:loadConfig()
     self:loadSyncState()
@@ -393,40 +409,13 @@ function NotionSync:notify(msg)
     end)
 end
 
-local function buildProgressMessage(state)
-    local lines = {
-        state.title or "NotionSync",
-        state.stage_label or "Working...",
-    }
-
-    if state.progress_total ~= nil then
-        table.insert(lines, string.format("%d/%d", state.progress_current or 0, state.progress_total))
-    end
-
-    if state.detail_text and state.detail_text ~= "" then
-        table.insert(lines, state.detail_text)
-    end
-
-    local count_line = string.format(
-        "New: %d  Updated: %d  Failed: %d",
-        state.new_count or 0,
-        state.updated_count or 0,
-        state.failed_count or 0
-    )
-    table.insert(lines, count_line)
-
-    return table.concat(lines, "\n")
-end
-
 function NotionSync:updateProgressPopup(dialog_ref, dialog_input)
-    local state = SyncProgressDialog.buildState(dialog_input)
-
     if dialog_ref[1] then
         UIManager:close(dialog_ref[1])
     end
 
     dialog_ref[1] = InfoMessage:new{
-        text = buildProgressMessage(state),
+        text = SyncProgressDialog.buildMessage(dialog_input),
         timeout = nil,
     }
     UIManager:show(dialog_ref[1])
@@ -733,23 +722,29 @@ function NotionSync:onSyncRequested()
     end
 
     self:withManagedWifi("single", function(dialog_ref)
+        local book_name = doc.file and (doc.file:match("([^/]+)$") or doc.file) or ""
+
         self:updateProgressPopup(dialog_ref, {
             mode = "single",
             stage = "syncing_changes",
-            completed_books = 0,
-            total_books = 0,
-            current_book = doc.file and (doc.file:match("([^/]+)$") or doc.file) or "",
+            current_book = book_name,
         })
         coroutine.yield()
 
-        local yield_func = function()
-            self:updateProgressPopup(dialog_ref, {
+        local yield_func = function(progress)
+            local info = {
                 mode = "single",
                 stage = "syncing_changes",
-                completed_books = 0,
-                total_books = 0,
-                current_book = doc.file and (doc.file:match("([^/]+)$") or doc.file) or "",
-            })
+                current_book = book_name,
+            }
+            if progress then
+                info.progress_current = progress.current
+                info.progress_total = progress.total
+                info.new_count = progress.new
+                info.updated_count = progress.updated
+                info.failed_count = progress.failed
+            end
+            self:updateProgressPopup(dialog_ref, info)
             coroutine.yield()
         end
 
@@ -767,7 +762,12 @@ function NotionSync:onSyncRequested()
                 failed_count = 0,
             })
             coroutine.yield()
-            self:notify(string.format("Success! New: %d, Updated: %d", result.new or 0, result.updated or 0))
+            local parts = {}
+            if (result.new or 0) > 0 then table.insert(parts, "New: " .. result.new) end
+            if (result.updated or 0) > 0 then table.insert(parts, "Updated: " .. result.updated) end
+            if (result.removed or 0) > 0 then table.insert(parts, "Removed: " .. result.removed) end
+            if #parts == 0 then table.insert(parts, "Already up to date") end
+            self:notify("Success! " .. table.concat(parts, ", "))
         else
             self:updateProgressPopup(dialog_ref, {
                 mode = "single",
@@ -878,8 +878,8 @@ function NotionSync:onSyncAllBooksRequested()
             local doc, annotations = loadBookFromPath(book_path)
 
             if doc and annotations and next(annotations) ~= nil then
-                local yield_func = function()
-                    self:updateProgressPopup(dialog_ref, {
+                local yield_func = function(progress)
+                    local info = {
                         mode = "bulk",
                         stage = "syncing_changes",
                         completed_books = i - 1,
@@ -888,7 +888,15 @@ function NotionSync:onSyncAllBooksRequested()
                         new_count = total_new,
                         updated_count = total_updated,
                         failed_count = total_failed,
-                    })
+                    }
+                    if progress then
+                        info.progress_current = progress.current
+                        info.progress_total = progress.total
+                        info.new_count = total_new + (progress.new or 0)
+                        info.updated_count = total_updated + (progress.updated or 0)
+                        info.failed_count = total_failed + (progress.failed or 0)
+                    end
+                    self:updateProgressPopup(dialog_ref, info)
                     coroutine.yield()
                 end
 

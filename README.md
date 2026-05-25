@@ -1,102 +1,116 @@
 # NotionSync for KOReader
 
-**NotionSync** is a powerful plugin for **KOReader** that automatically synchronizes your book highlights and notes directly to a **Notion database**. 
+**NotionSync** is a plugin for **KOReader** that synchronizes your book highlights and notes to a **Notion database**. Each book gets its own page with an inline annotations table — sortable, filterable, and visible directly on the page.
 
 ## Features
 
-- **Sync All Highlights**: Instantly export all your highlights and notes to your Notion database.
-- **Incremental Updates**: Only new or changed highlights are synced for efficiency.
-- **Cached Notion Lookups**: Database schema and page lookups are cached during a sync session to reduce repeated API requests, especially when syncing many books.
-- **Rich Formatting**: Highlights are formatted into blocks including page number, chapter, date, your notes and a hidden link to the highlight anchor.
-- **Rich Metadata Sync**: Automatically fills in book info like authors, ISBN, reading progress, language, pages, and start date (if those columns exist in selected database).
-- **Optional Metadata Sync**: Metadata updates can be disabled from the NotionSync settings menu if you only want highlight content.
-- **Visible Sync Status**: The plugin shows a persistent sync progress dialog with current stage, current book, and running counters.
-- **Local Sync State Cache**: Per-book sync state is stored locally to reuse known Notion page IDs and skip unnecessary remote scans when possible.
-- **Managed Wi-Fi**: If Wi-Fi is off, NotionSync can turn it on for the sync and turn it off again afterward.
-- **One-Click Sync**: You can asign the sync as gesture (for example as corner click) to quickly sync your highlights.
-- **Bulk Sync Without Opening Books**: Sync all books from KOReader history that have saved annotations, without opening each one manually.
+- **Per-Book Annotations Table**: Each book page contains an inline Notion database with columns for Text, Chapter, Created, Note, and Page.
+- **Efficient Incremental Sync**: Only new or changed highlights are synced. Re-syncing a book with no changes makes zero annotation API calls.
+- **HighlightID Tracking**: Each annotation carries a unique ID for reliable matching. If local sync state is lost, the plugin recovers by reading IDs from Notion — no duplicates.
+- **Orphan Cleanup**: Highlights deleted locally are automatically archived in Notion on the next sync.
+- **Self-Healing**: If a row is deleted in Notion manually, the plugin detects the 404 and recreates it. If a book page or annotations database is deleted, the plugin recreates them.
+- **Rich Metadata Sync**: Automatically fills in Authors, ISBN, Progress, Language, Pages, and Start Reading date (if those columns exist in your books database). Metadata is only updated when values actually change.
+- **Live Progress Display**: Shows real-time progress during sync (e.g. "Syncing 10 / 115") with running counters for new, updated, and failed highlights.
+- **Managed Wi-Fi**: If Wi-Fi is off, the plugin turns it on for the sync and off again afterward.
+- **Gesture Support**: Assign sync to a tap gesture for one-tap syncing.
+- **Bulk Sync**: Sync all books from KOReader history without opening each one. Pre-filters to books that actually have annotations.
+- **Network Resilience**: Retries failed requests with delays to handle the Kobo's limited network stack. Uses `Connection: close` to prevent socket exhaustion.
+- **Debug Logging**: All API requests and errors are logged to `notion_debug.log` in the plugin folder. Log auto-rotates at 256 KB.
 
-## ️ Notion Setup
+## Notion Setup
 
-Create a Notion Database with the following columns. **All metadata columns are optional**—if you don't add them, the plugin simply skips them.
+### 1. Books Database
 
-| Property Name | Verified Types | Description |
-|--------------|-------|-------------|
-| **Name**     | Title | **Required**. Book title. |
-| **Last Sync**| Text  | **Required**. Used to track updates. |
-| **Authors**  | Multi-select *or* Text | Smart splitting of multiple authors (e.g. "Author A; Author B"). |
-| **ISBN**     | Text  | The book's ISBN. |
-| **Progress** | Number *or* Text | Reading percentage (0.0 to 1.0). Best formatted as `%` in Notion. |
-| **Language** | Select *or* Text | Language code (e.g., `en`). |
-| **Pages**    | Number *or* Text | Total pages in the book. |
-| **Start Reading** | Date | Date the book was first opened/highlighted. |
+Create a Notion database for your books. Only the **Name** column is required. All metadata columns are optional — if you don't add them, the plugin skips them.
 
-> **Note**: Column names in Notion Database are **case-insensitive** (e.g., "progress", "Progress", "PROGRESS" all work).
+| Column | Type | Description |
+|--------|------|-------------|
+| **Name** | Title | **Required.** Book title. |
+| Authors | Multi-select or Text | Author names (multiple separated by `;`). |
+| ISBN | Text | The book's ISBN. |
+| Progress | Number | Reading percentage (0.0 to 1.0). Format as `%` in Notion. |
+| Language | Select or Text | Language code (e.g. `de-DE`, `en`). |
+| Pages | Number | Total pages in the book. |
+| Start Reading | Date | Date the first highlight was created. |
+
+Column names are **case-insensitive** (e.g. "progress", "Progress", "PROGRESS" all work).
+
+### 2. Annotations Table (Auto-Created)
+
+When you sync a book for the first time, the plugin automatically creates an inline **Annotations** database on the book's page with these columns:
+
+| Column | Type | Description |
+|--------|------|-------------|
+| Text | Title | The highlighted text (first column). |
+| Chapter | Text | Chapter name, if available. |
+| Created | Date | When the highlight was created. |
+| Note | Text | Your note on the highlight, if any. |
+| Page | Number | Page number. |
+| HighlightID | Text | Unique ID for sync tracking. |
+
+You can sort and filter this table in Notion however you like.
 
 ## Installation
 
-1. Download the latest `notionsync.koplugin.zip` from the **Releases** page (or clone this repo).
+1. Download the latest release or clone this repo.
 2. Connect your KOReader device via USB.
-3. Navigate to `koreader/plugins/`.
-4. Extract the `notionsync.koplugin` folder there.
-5. Restart KOReader
+3. Copy the `notionsync.koplugin` folder to `koreader/plugins/`.
+4. Eject the device properly and restart KOReader.
 
-## ️ Setup
+## Setup
 
-1. **Get Notion Token**: Go to [Notion My Integrations](https://www.notion.so/my-integrations), create a new integration, and copy the Secret (`ntn_...`).
-2. **Connect Database**: Open your Notion Database page -> **... (menu)** -> **Connect to** -> Select your integration.
-3. **Add credentials in the plugin folder**:
-   - Edit `notionsync.koplugin/notion_credentials.lua`
-   - Set `notion_token = "..."` and `database_id = "..."`.
-   - Leave `notion_version` at `2022-06-28` unless you need a different Notion API version.
-4. **Configure on Device**:
+1. **Get a Notion Token**: Go to [Notion Integrations](https://www.notion.so/my-integrations), create a new integration, and copy the secret (`ntn_...`).
+2. **Connect your database**: Open your Notion database page, click **...** (menu) > **Connect to** > select your integration.
+3. **Configure on device**:
    - Open any book in KOReader.
-   - Go to **Tools (Gear/Wrench)** -> **NotionSync** -> **Settings**.
-   - You can still use **Set Notion Token** and **Select Database** from the plugin menu if you prefer. These values are now written to `notion_credentials.lua`.
-   - Use **Metadata Sync** to choose whether book metadata columns should be updated in Notion during sync.
+   - Go to **Tools** > **NotionSync** > **Settings**.
+   - Set your Notion token and select your database.
+   - Toggle **Metadata Sync** on or off as needed.
 
-## Config Files
+Alternatively, edit `notion_credentials.lua` directly in the plugin folder:
 
-- `notion_credentials.lua`: editable credentials file for `notion_token`, `database_id`, and `notion_version`.
-- `config.json`: runtime plugin settings only, such as `metadata_sync`. Credentials are no longer stored here by default.
-- `sync_state.lua`: local per-book sync cache used to speed up repeat syncs.
+```lua
+return {
+    notion_token = "ntn_...",
+    database_id = "your-database-id",
+    notion_version = "2022-06-28",
+}
+```
 
 ## Usage
 
-### Sync current book
-1. Open a book.
-2. Go to **Tools Menu**.
-3. Tap **NotionSync > Sync Highlights to Notion**.
+### Sync Current Book
 
-When started from the menu or gesture, the plugin now shows a persistent sync dialog with the current stage, the current book, and running new/updated/failed counters.
+1. Open a book with highlights.
+2. Go to **Tools** > **NotionSync** > **Sync Highlights to Notion**.
 
-### Sync all books
+The progress popup shows: `Syncing 10 / 115` with live New/Updated counters.
 
-You can sync all books from your KOReader history that contain highlights without opening each book manually. This is useful for an initial import or for catching up after reading across multiple books.
-1. Go to **Top Menu > Tools**
-2. Tap **NotionSync > Sync All Highlights to Notion**. 
+### Sync All Books
 
-> [!WARNING]
-> Depending on you history size, this process can take a while.
+1. Go to **Tools** > **NotionSync** > **Sync All Highlights to Notion**.
+2. The popup shows per-highlight progress within each book, plus which book is being synced (e.g. "Book 2/8: My Book Title").
 
 ### Gesture Sync
-You can assign **NotionSync: Sync Current Book** to a tap gesture in **Settings -> Taps and gestures -> Gesture manager**. This action only syncs the book that is currently open.
 
-If Wi-Fi is currently off, the plugin will try to turn it on, perform the sync, and turn it off again when the sync finishes.
+Assign **NotionSync: Sync Current Book** to a tap gesture in **Settings** > **Taps and gestures** > **Gesture manager**. This syncs only the currently open book.
 
-Bulk sync now pre-filters history entries to books that actually have saved annotations before the main sync loop starts, so the progress display reflects real work instead of raw history length.
+### Reset Sync State
 
-## Known Issues
+If sync gets into a bad state, use **Tools** > **NotionSync** > **Reset Sync State**. The next sync will rebuild its tracking data from Notion using HighlightIDs — no duplicates will be created.
 
-### HTTP 400 on some books
+## Config Files
 
-Older versions could fail with `HTTP 400` on some books during page creation, while manually creating the page in Notion first would make syncing work. A likely cause was book titles containing unsupported formatting for Notion requests, such as embedded line breaks, empty titles, or titles that exceeded Notion's text limits.
+| File | Purpose |
+|------|---------|
+| `notion_credentials.lua` | Notion token, database ID, API version. |
+| `config.json` | Runtime settings (metadata sync toggle). |
+| `sync_state.lua` | Local per-book sync cache (page IDs, highlight mappings, last sync time). |
+| `notion_debug.log` | Debug log with all API requests and errors. Auto-rotates at 256 KB. |
 
-This plugin now normalizes book titles before querying or creating pages in Notion:
+## Troubleshooting
 
-- line breaks are converted to spaces
-- surrounding whitespace is trimmed
-- empty titles fall back to `Unknown Title`
-- very long titles are truncated to Notion's text limit
-
-If you still hit `HTTP 400` after this update, the next most likely cause is a database schema mismatch or a specific highlight payload that Notion rejects.
+- **"Plugin not configured"**: Set your Notion token and select a database in Settings.
+- **DNS / network errors**: The Kobo's network stack can exhaust sockets. The plugin retries up to 5 times with 2-second delays. Make sure Wi-Fi signal is stable.
+- **Duplicates after reset**: Should not happen — the plugin recovers row mappings from HighlightID. If it does, check `notion_debug.log` for errors.
+- **Missing columns in Notion**: The plugin only populates columns that exist in your database. Add the columns from the table above if you want metadata filled in.

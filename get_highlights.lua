@@ -9,25 +9,6 @@ function GetHighlights.transform(doc, raw_annotations)
 
     -- 1. Get Book Metadata
     local props = doc:getProps()
-    
-    -- DEBUG: Print all props keys to see what we actually have
-    local logger = require("custom_logger")
-    if props then
-        local debug_keys = ""
-        for k, v in pairs(props) do debug_keys = debug_keys .. k .. "=" .. tostring(v) .. "; " end
-        logger.info("NotionSync Props: " .. debug_keys)
-    else
-        logger.info("NotionSync Props: NIL")
-    end
-
-    -- Also check doc.info directly if possible
-    if doc.info then
-        local json = require("json")
-        -- Safe encode just top level to avoid recursion issues
-        pcall(function() logger.info("NotionSync DocInfo: " .. json.encode(doc.info)) end)
-    else
-        logger.info("NotionSync DocInfo: NIL")
-    end
 
     local book_title = nil
     

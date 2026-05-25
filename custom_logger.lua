@@ -11,6 +11,18 @@ local function getPluginDir()
 end
 
 local LOG_FILE = getPluginDir() .. "/notion_debug.log"
+local MAX_LOG_SIZE = 256 * 1024  -- 256 KB
+
+local function rotate_if_needed()
+    local f = io.open(LOG_FILE, "r")
+    if not f then return end
+    local size = f:seek("end")
+    f:close()
+    if size and size > MAX_LOG_SIZE then
+        os.remove(LOG_FILE .. ".old")
+        os.rename(LOG_FILE, LOG_FILE .. ".old")
+    end
+end
 
 local function append_to_file(level, msg)
     local f = io.open(LOG_FILE, "a")
@@ -42,7 +54,8 @@ function CustomLogger.dbg(msg)
     logger.dbg("[NotionSync] " .. tostring(msg))
 end
 
--- Initialize with a separator
+-- Rotate and initialize with a separator
+rotate_if_needed()
 local f = io.open(LOG_FILE, "a")
 if f then
     f:write("\n\n================= NEW SESSION =================\n")

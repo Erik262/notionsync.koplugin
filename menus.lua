@@ -19,6 +19,15 @@ function Menus.register(plugin, menu_items)
                 end
             },
             {
+                text = "Reset Sync State",
+                callback = function()
+                    plugin.sync_state = { books = {} }
+                    local SyncStateStore = require("sync_state_store")
+                    SyncStateStore.save(plugin.sync_state_file, plugin.sync_state)
+                    plugin:notify("Sync state cleared — next sync will do a full resync")
+                end
+            },
+            {
                 text = "Settings",
                 callback = function()
                     plugin:showConfigMenu()

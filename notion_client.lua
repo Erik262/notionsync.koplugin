@@ -48,61 +48,88 @@ function NotionClient:new(config)
 end
 
 function NotionClient:request(method, endpoint, body_table)
+    local socket = require("socket")
     local url = self.api_url .. endpoint
     local response_body = {}
-    
+
     local headers = {
         ["Authorization"] = "Bearer " .. self.token,
         ["Notion-Version"] = self.version,
-        ["Content-Type"] = "application/json",
-        ["Connection"] = "keep-alive"
+        ["Connection"] = "close"
     }
 
-    local source = nil
+    local json_body = nil
     if body_table then
-        local json_body = json.encode(body_table)
-        source = ltn12.source.string(json_body)
-        headers["Content-Length"] = string.len(json_body)
+        json_body = json.encode(body_table)
+        headers["Content-Type"] = "application/json"
+        headers["Content-Length"] = tostring(#json_body)
     end
 
-    logger.info("NotionSync: " .. method .. " " .. url)
+    logger.info("REQUEST: " .. method .. " " .. url)
+    if json_body then
+        logger.dbg("REQUEST BODY: " .. json_body)
+    end
 
-    local max_retries = 3
+    local max_retries = 5
     local code, status
-    
+
     for i = 1, max_retries do
         response_body = {}
-        if body_table then
-            source = ltn12.source.string(json.encode(body_table))
-        end
 
-        local _, r_code, _, r_status = https.request{
+        local request_params = {
             url = url,
             method = method,
             headers = headers,
-            source = source,
             sink = ltn12.sink.table(response_body),
             protocol = "any",
             options = {"all", "no_sslv2", "no_sslv3"},
             verify = "none",
-            timeout = self.TIMEOUT 
+            timeout = self.TIMEOUT
         }
+
+        if json_body then
+            request_params.source = ltn12.source.string(json_body)
+        end
+
+        local _, r_code, _, r_status = https.request(request_params)
         code = r_code
         status = r_status
 
         if code == 200 then break end
-        if type(code) == "number" and code >= 400 and code < 500 then break end
-    end
 
-    if code ~= 200 then
-        local response_str = table.concat(response_body)
-        logger.warn("NotionSync HTTP Error Body: " .. response_str)
-        return nil, "HTTP " .. tostring(code) .. ": " .. tostring(status)
+        if type(code) ~= "number" then
+            -- Network/DNS error (not an HTTP status code) — wait and retry
+            logger.warn("Network error (attempt " .. i .. "/" .. max_retries .. "): " .. tostring(code))
+            if i < max_retries then
+                socket.sleep(2)
+            end
+        elseif code == 429 and i < max_retries then
+            logger.warn("Rate limited, retry " .. i)
+            socket.sleep(1)
+        elseif code >= 400 and code < 500 then
+            break
+        end
     end
 
     local response_str = table.concat(response_body)
+
+    if code ~= 200 then
+        logger.err("HTTP " .. tostring(code) .. " from " .. method .. " " .. endpoint)
+        logger.err("RESPONSE: " .. response_str)
+        if json_body then
+            logger.err("SENT BODY: " .. json_body)
+        end
+        return nil, "HTTP " .. tostring(code) .. ": " .. response_str
+    end
+
     if response_str == "" then return {} end
-    return json.decode(response_str)
+    local ok, decoded = pcall(json.decode, response_str)
+    if not ok then
+        logger.err("JSON decode failed: " .. tostring(decoded))
+        logger.err("RAW RESPONSE: " .. response_str)
+        return nil, "JSON decode failed"
+    end
+    return decoded
 end
 
 function NotionClient:listDatabases()
@@ -120,6 +147,12 @@ function NotionClient:getDatabase(database_id)
         self.cache.databases[database_id] = res
     end
     return res, err
+end
+
+function NotionClient:clearDatabaseCache(database_id)
+    if database_id then
+        self.cache.databases[database_id] = nil
+    end
 end
 
 function NotionClient:findPage(title)
@@ -144,14 +177,21 @@ function NotionClient:findPage(title)
     return nil
 end
 
+function NotionClient:clearPageCache(title)
+    if title then
+        local safe_title = sanitizeTextValue(title, "Unknown Title")
+        self.cache.pages[safe_title] = nil
+        self.cache.missing_pages[safe_title] = nil
+    end
+end
+
 function NotionClient:createPage(title, extra_props)
     if not self.database_id then return nil, "No Database Selected" end
     local safe_title = sanitizeTextValue(title, "Unknown Title")
     local properties = {
         Name = { title = {{ text = { content = safe_title } }} }
     }
-    
-    -- Merge extra properties (ISBN, Author, Progress, etc)
+
     if extra_props then
         for k, v in pairs(extra_props) do
             properties[k] = v
@@ -175,11 +215,6 @@ function NotionClient:updatePageProperties(page_id, properties)
     return self:request("PATCH", "/pages/" .. page_id, body)
 end
 
-function NotionClient:updateLastSync(page_id, iso_date)
-    local body = { properties = { ["Last Sync"] = { rich_text = {{ text = { content = iso_date } }} } } }
-    return self:request("PATCH", "/pages/" .. page_id, body)
-end
-
 function NotionClient:getBlockChildren(block_id)
     local all_results = {}
     local cursor = nil
@@ -188,31 +223,118 @@ function NotionClient:getBlockChildren(block_id)
         if cursor then endpoint = endpoint .. "&start_cursor=" .. cursor end
         local res, err = self:request("GET", endpoint)
         if not res then return nil, err end
-        for _, block in ipairs(res.results) do table.insert(all_results, block) end
+        for _, block in ipairs(res.results or {}) do table.insert(all_results, block) end
         if res.has_more then cursor = res.next_cursor else cursor = nil end
     until not cursor
     return all_results
 end
 
-function NotionClient:appendBlockChildren(block_id, blocks)
-    local body = { children = blocks }
-    return self:request("PATCH", "/blocks/" .. block_id .. "/children", body)
-end
+function NotionClient:createInlineDatabase(parent_page_id, title, schema_properties)
+    -- Build JSON manually to guarantee column order in Notion
+    -- (Lua tables with string keys have no order; json.encode shuffles them)
+    local prop_json = '{'
+        .. '"Text":{"title":{}},'
+        .. '"Chapter":{"rich_text":{}},'
+        .. '"Created":{"date":{}},'
+        .. '"Note":{"rich_text":{}},'
+        .. '"Page":{"number":{"format":"number"}},'
+        .. '"HighlightID":{"rich_text":{}}'
+        .. '}'
 
-function NotionClient:updateBlock(block_id, content)
-    -- CHANGE: We now check if 'content' is a string or a table.
-    -- If it's a table, we assume it's a full 'rich_text' array.
-    local rich_text_body
-    if type(content) == "table" then
-        rich_text_body = content
-    else
-        rich_text_body = {{ text = { content = content } }}
+    local body_json = '{'
+        .. '"parent":{"type":"page_id","page_id":"' .. parent_page_id .. '"},'
+        .. '"is_inline":true,'
+        .. '"title":[{"type":"text","text":{"content":"' .. title .. '"}}],'
+        .. '"properties":' .. prop_json
+        .. '}'
+
+    logger.info("Creating inline DB on page " .. parent_page_id .. " with title '" .. title .. "'")
+
+    -- Use raw JSON request to preserve property order
+    local socket = require("socket")
+    local response_body = {}
+    local headers = {
+        ["Authorization"] = "Bearer " .. self.token,
+        ["Notion-Version"] = self.version,
+        ["Connection"] = "close",
+        ["Content-Type"] = "application/json",
+        ["Content-Length"] = tostring(#body_json),
+    }
+
+    local url = self.api_url .. "/databases"
+    logger.info("REQUEST: POST " .. url)
+    logger.dbg("REQUEST BODY: " .. body_json)
+
+    local max_retries = 5
+    local code
+    for i = 1, max_retries do
+        response_body = {}
+        local _, r_code = https.request({
+            url = url,
+            method = "POST",
+            headers = headers,
+            source = ltn12.source.string(body_json),
+            sink = ltn12.sink.table(response_body),
+            protocol = "any",
+            options = {"all", "no_sslv2", "no_sslv3"},
+            verify = "none",
+            timeout = self.TIMEOUT,
+        })
+        code = r_code
+        if code == 200 then break end
+        if type(code) ~= "number" then
+            logger.warn("Network error (attempt " .. i .. "/" .. max_retries .. "): " .. tostring(code))
+            if i < max_retries then socket.sleep(2) end
+        elseif code >= 400 and code < 500 then
+            break
+        end
     end
 
+    local response_str = table.concat(response_body)
+    if code ~= 200 then
+        logger.err("HTTP " .. tostring(code) .. " from POST /databases")
+        logger.err("RESPONSE: " .. response_str)
+        logger.err("SENT BODY: " .. body_json)
+        return nil, "HTTP " .. tostring(code) .. ": " .. response_str
+    end
+
+    if response_str == "" then return {} end
+    local ok, decoded = pcall(json.decode, response_str)
+    if not ok then return nil, "JSON decode failed" end
+    return decoded
+end
+
+function NotionClient:queryDatabaseRows(database_id, options)
+    options = options or {}
+    local all_results = {}
+    local cursor = nil
+    repeat
+        local body = { page_size = 100 }
+        if options.sorts then body.sorts = options.sorts end
+        if options.filter then body.filter = options.filter end
+        if cursor then body.start_cursor = cursor end
+
+        local res, err = self:request("POST", "/databases/" .. database_id .. "/query", body)
+        if not res then return nil, err end
+        for _, row in ipairs(res.results or {}) do
+            table.insert(all_results, row)
+        end
+        if res.has_more then cursor = res.next_cursor else cursor = nil end
+    until not cursor
+    return all_results
+end
+
+function NotionClient:createRow(database_id, properties)
     local body = {
-        quote = { rich_text = rich_text_body }
+        parent = { database_id = database_id },
+        properties = properties
     }
-    return self:request("PATCH", "/blocks/" .. block_id, body)
+    return self:request("POST", "/pages", body)
+end
+
+function NotionClient:archivePage(page_id)
+    local body = { archived = true }
+    return self:request("PATCH", "/pages/" .. page_id, body)
 end
 
 return NotionClient
