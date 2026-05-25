@@ -241,9 +241,13 @@ function SyncManager.sync(client, payload, notify_func, yield_func, book_state)
             if val_str:find(";") then
                 for part in string.gmatch(val_str, "([^;]+)") do
                     local clean = part:match("^%s*(.-)%s*$")
-                    if clean and clean ~= "" then table.insert(tags, { name = clean }) end
+                    if clean and clean ~= "" then
+                        clean = clean:gsub(",", "")  -- Notion multi_select forbids commas
+                        table.insert(tags, { name = clean })
+                    end
                 end
             else
+                val_str = val_str:gsub(",", "")  -- Notion multi_select forbids commas
                 table.insert(tags, { name = val_str })
             end
             return { multi_select = tags }
