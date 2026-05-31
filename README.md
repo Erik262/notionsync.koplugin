@@ -54,7 +54,10 @@ You can sort and filter this table in Notion however you like.
 
 1. Download the latest release or clone this repo.
 2. Connect your KOReader device via USB.
-3. Copy the `notionsync.koplugin` folder to `koreader/plugins/`.
+3. Copy the `notionsync.koplugin` folder to the `plugins/` directory on your KOReader device:
+   - **Kobo**: `/.adds/koreader/plugins` (the `.adds` folder is hidden — on macOS press **⌘ + Shift + .** in Finder to show it).
+   - **Kindle**: `/koreader/plugins`
+   - **Android**: `koreader/plugins` at the root of onboard storage.
 4. Eject the device properly and restart KOReader.
 
 ## Setup
@@ -88,6 +91,33 @@ return {
 Copy the new `notionsync.koplugin` folder over the existing one (or download
 the latest release and extract it in place). Your token, database ID, and sync
 state are preserved across updates because they are not part of the release.
+
+### Migrating from a pre-1.0 install
+
+Versions before 1.0 stored credentials in `notion_credentials.lua` **inside**
+the plugin folder. Version 1.0 moves them to `notionsync_credentials.lua` in
+KOReader's settings directory (e.g. `…/koreader/settings/`), outside the plugin
+folder, so future updates can't overwrite them. The migration is automatic, but
+it runs *the first time the new code starts*, so your old credentials file must
+be in place at that moment:
+
+1. **Update without deleting the folder.** Copy the new files *over* the
+   existing `notionsync.koplugin` folder. The release does not contain
+   `notion_credentials.lua`, so your existing one is left untouched.
+2. **Restart KOReader.** On launch the plugin reads your in-plugin
+   `notion_credentials.lua` and writes the token + database ID to
+   `…/koreader/settings/notionsync_credentials.lua`.
+3. **Verify.** Open **Tools > NotionSync > Settings** — the token should show
+   "Set (Ends in …)" and the database "Configured (…)". Or check that
+   `notionsync_credentials.lua` in the settings folder contains your values.
+4. **Clean up (optional).** Once migrated, the in-plugin `notion_credentials.lua`
+   is unused; you can delete it (good hygiene, since it holds your token in
+   plain text).
+
+If you prefer a clean install (delete the folder, then drop in the new one),
+the old credentials file goes with it and there's nothing to migrate — just
+re-enter your token and database via **Tools > NotionSync > Settings** after
+restarting. That writes straight to the new external location.
 
 ## Usage
 
