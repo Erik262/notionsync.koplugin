@@ -67,7 +67,13 @@ You can sort and filter this table in Notion however you like.
    - Set your Notion token and select your database.
    - Toggle **Metadata Sync** on or off as needed.
 
-Alternatively, edit `notion_credentials.lua` directly in the plugin folder:
+Your credentials are saved to `notionsync_credentials.lua` in KOReader's
+settings directory — **outside** the plugin folder — so updating or
+reinstalling the plugin never overwrites them.
+
+Alternatively, for a fresh install you can create `notion_credentials.lua`
+inside the plugin folder and the plugin will import it on first launch (the
+values are then migrated to the external settings file):
 
 ```lua
 return {
@@ -76,6 +82,12 @@ return {
     notion_version = "2022-06-28",
 }
 ```
+
+## Updating
+
+Copy the new `notionsync.koplugin` folder over the existing one (or download
+the latest release and extract it in place). Your token, database ID, and sync
+state are preserved across updates because they are not part of the release.
 
 ## Usage
 
@@ -101,12 +113,12 @@ If sync gets into a bad state, use **Tools** > **NotionSync** > **Reset Sync Sta
 
 ## Config Files
 
-| File | Purpose |
-|------|---------|
-| `notion_credentials.lua` | Notion token, database ID, API version. |
-| `config.json` | Runtime settings (metadata sync toggle). |
-| `sync_state.lua` | Local per-book sync cache (page IDs, highlight mappings, last sync time). |
-| `notion_debug.log` | Debug log with all API requests and errors. Auto-rotates at 256 KB. |
+| File | Location | Purpose |
+|------|----------|---------|
+| `notionsync_credentials.lua` | KOReader settings dir | Notion token, database ID, API version. Stored outside the plugin folder so updates don't overwrite it. |
+| `config.json` | Plugin folder | Runtime settings (metadata sync toggle). |
+| `sync_state.lua` | Plugin folder | Local per-book sync cache (page IDs, highlight mappings, last sync time). |
+| `notion_debug.log` | Plugin folder | Debug log with all API requests and errors. Auto-rotates at 256 KB. |
 
 ## Troubleshooting
 

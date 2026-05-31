@@ -73,7 +73,8 @@ local NotionSync = WidgetContainer:new{
 function NotionSync:init()
     self.plugin_dir = getPluginDir()
     self.config_file = joinPath(self.plugin_dir, "config.json")
-    self.credentials_file = joinPath(self.plugin_dir, "notion_credentials.lua")
+    self.legacy_credentials_file = joinPath(self.plugin_dir, "notion_credentials.lua")
+    self.credentials_file = self:getCredentialsPath()
     self.sync_state_file = joinPath(self.plugin_dir, "sync_state.lua")
 
     -- Diagnostic: write a marker file so we can confirm this code version ran
@@ -106,6 +107,21 @@ end
 -- CONFIGURATION LOGIC
 -- =========================================================
 
+-- Credentials are stored OUTSIDE the plugin folder (in KOReader's settings
+-- directory) so that updating or reinstalling the plugin never overwrites the
+-- user's Notion token and database ID. Falls back to the old in-plugin
+-- location only if the settings directory cannot be resolved.
+function NotionSync:getCredentialsPath()
+    local ok, DataStorage = pcall(require, "datastorage")
+    if ok and DataStorage and DataStorage.getSettingsDir then
+        local settings_dir = DataStorage:getSettingsDir()
+        if settings_dir and settings_dir ~= "" then
+            return joinPath(settings_dir, "notionsync_credentials.lua")
+        end
+    end
+    return self.legacy_credentials_file
+end
+
 function NotionSync:loadConfig()
     local loaded_anything = false
 
@@ -131,7 +147,19 @@ function NotionSync:loadConfig()
         end
     end
 
+    local migrated = false
     local credentials, cred_err = loadLuaTable(self.credentials_file)
+    if not credentials and self.credentials_file ~= self.legacy_credentials_file then
+        -- One-time migration: pull credentials saved by older versions from
+        -- inside the plugin folder into the new external location.
+        local legacy = loadLuaTable(self.legacy_credentials_file)
+        if legacy and ((legacy.notion_token and legacy.notion_token ~= "")
+                or (legacy.database_id and legacy.database_id ~= "")) then
+            credentials = legacy
+            migrated = true
+        end
+    end
+
     if credentials then
         if credentials.notion_token ~= nil then
             self.config.notion_token = credentials.notion_token or ""
@@ -147,7 +175,9 @@ function NotionSync:loadConfig()
         logger.warn("NotionSync: Could not load credentials file: " .. tostring(cred_err))
     end
 
-    if not loaded_anything then
+    -- Persist on first run (creates config) or after migrating credentials to
+    -- the new external location.
+    if not loaded_anything or migrated then
         self:saveConfig()
     end
 

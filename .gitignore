@@ -1,1 +1,11 @@
 .DS_Store
+
+# User-specific runtime files — must never ship in a release, otherwise
+# updating the plugin would overwrite the user's settings/credentials.
+notion_credentials.lua
+config.json
+sync_state.lua
+
+# Debug / diagnostic artifacts written at runtime.
+notion_debug.log
+LOADED_OK
