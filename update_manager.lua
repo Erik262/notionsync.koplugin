@@ -81,25 +81,66 @@ function UpdateManager.get(url, accept_json, max_attempts)
     return nil, last_err
 end
 
--- Parse a version string like "v1.2.3" into { 1, 2, 3 }.
+-- Parse a version string like "v1.2.3-beta.4" into release numbers { 1, 2, 3 }
+-- and a prerelease string ("beta.4") or nil. Leading "v" is ignored.
 function UpdateManager.parseVersion(v)
-    local parts = {}
-    for n in tostring(v or ""):gmatch("%d+") do
-        parts[#parts + 1] = tonumber(n)
+    v = tostring(v or ""):gsub("^[vV]", "")
+    local main, pre = v:match("^([^%-]*)%-?(.*)$")
+    local release = {}
+    for n in (main or ""):gmatch("%d+") do
+        release[#release + 1] = tonumber(n)
     end
-    return parts
+    if pre == "" then pre = nil end
+    return release, pre
 end
 
--- Returns -1 if a < b, 0 if equal, 1 if a > b (semantic version compare).
+local function split_identifiers(s)
+    local ids = {}
+    for id in s:gmatch("[^%.]+") do
+        ids[#ids + 1] = id
+    end
+    return ids
+end
+
+-- Returns -1 if a < b, 0 if equal, 1 if a > b (semantic version compare,
+-- including prerelease precedence: 1.1.0-beta.1 < 1.1.0).
 function UpdateManager.compareVersions(a, b)
-    local pa = UpdateManager.parseVersion(a)
-    local pb = UpdateManager.parseVersion(b)
-    local n = math.max(#pa, #pb)
-    for i = 1, n do
-        local x = pa[i] or 0
-        local y = pb[i] or 0
+    local ra, pa = UpdateManager.parseVersion(a)
+    local rb, pb = UpdateManager.parseVersion(b)
+
+    -- Compare release numbers first.
+    for i = 1, math.max(#ra, #rb) do
+        local x = ra[i] or 0
+        local y = rb[i] or 0
         if x ~= y then
             return x < y and -1 or 1
+        end
+    end
+
+    -- Release numbers equal: a version WITH a prerelease tag is lower than one
+    -- without (1.1.0-beta < 1.1.0).
+    if pa and not pb then return -1 end
+    if pb and not pa then return 1 end
+    if not pa and not pb then return 0 end
+
+    -- Both have prerelease tags: compare dot-separated identifiers.
+    local ia = split_identifiers(pa)
+    local ib = split_identifiers(pb)
+    for i = 1, math.max(#ia, #ib) do
+        local xa = ia[i]
+        local xb = ib[i]
+        if xa == nil then return -1 end  -- fewer identifiers = lower precedence
+        if xb == nil then return 1 end
+        local na = tonumber(xa)
+        local nb = tonumber(xb)
+        if na and nb then
+            if na ~= nb then return na < nb and -1 or 1 end
+        elseif na and not nb then
+            return -1  -- numeric identifiers are lower than alphanumeric
+        elseif nb and not na then
+            return 1
+        elseif xa ~= xb then
+            return xa < xb and -1 or 1
         end
     end
     return 0
