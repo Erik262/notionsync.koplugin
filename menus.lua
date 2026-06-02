@@ -28,6 +28,12 @@ function Menus.register(plugin, menu_items)
                 end
             },
             {
+                text = "Check for Updates",
+                callback = function()
+                    plugin:checkForUpdates({ silent = false })
+                end
+            },
+            {
                 text = "Settings",
                 callback = function()
                     plugin:showConfigMenu()

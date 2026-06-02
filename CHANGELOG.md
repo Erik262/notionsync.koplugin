@@ -5,6 +5,27 @@ All notable changes to NotionSync are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-06-02
+
+### Added
+- **In-app updater.** NotionSync can now update itself on-device over Wi-Fi — no
+  computer needed. It checks GitHub for the latest release; when a newer version
+  is available it prompts **Update** or **Skip**, and on confirmation downloads
+  and installs the new files in place. Available via **Tools > NotionSync >
+  Check for Updates** and from the Settings screen.
+  - A quiet startup check runs at most once per day and only when Wi-Fi is
+    already on — it never turns Wi-Fi on by itself. Toggle it under
+    **Settings > Check for Updates on Startup**.
+  - Downloads are verified entirely into memory before any file is overwritten,
+    so a failed or interrupted download can't corrupt the installed plugin.
+  - Credentials are untouched by updates (they live outside the plugin folder
+    as of 1.0.0).
+
+### Notes
+- To use auto-update, install 1.1.0 once (manually), then future releases can be
+  installed from the device. The updater compares your installed version against
+  the latest GitHub release tag, so each release must bump the version.
+
 ## [1.0.0] - 2026-05-31
 
 First public release.
@@ -31,4 +52,5 @@ First public release.
 - `config.json` and `notion_credentials.lua` are no longer shipped in the release
   archive, so installing an update over an existing installation preserves your settings.
 
+[1.1.0]: https://github.com/Erik262/notionsync.koplugin/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Erik262/notionsync.koplugin/releases/tag/v1.0.0

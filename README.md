@@ -12,6 +12,7 @@
 - **Rich Metadata Sync**: Automatically fills in Authors, ISBN, Progress, Language, Pages, and Start Reading date (if those columns exist in your books database). Metadata is only updated when values actually change.
 - **Live Progress Display**: Shows real-time progress during sync (e.g. "Syncing 10 / 115") with running counters for new, updated, and failed highlights.
 - **Managed Wi-Fi**: If Wi-Fi is off, the plugin turns it on for the sync and off again afterward.
+- **In-App Updates**: Update the plugin on-device over Wi-Fi — no computer needed. NotionSync checks GitHub for new releases and prompts you to update or skip.
 - **Gesture Support**: Assign sync to a tap gesture for one-tap syncing.
 - **Bulk Sync**: Sync all books from KOReader history without opening each one. Pre-filters to books that actually have annotations.
 - **Network Resilience**: Retries failed requests with delays to handle the Kobo's limited network stack. Uses `Connection: close` to prevent socket exhaustion.
@@ -87,6 +88,28 @@ return {
 ```
 
 ## Updating
+
+### From the device (auto-update)
+
+From version 1.1.0 onward, NotionSync can update itself over Wi-Fi — no computer
+needed:
+
+- Tap **Tools > NotionSync > Check for Updates** (also available in Settings).
+- If a newer release exists, you'll be prompted to **Update** or **Skip**.
+  Choosing Update downloads the new version and installs it in place; then fully
+  close and reopen KOReader to apply it.
+- NotionSync also checks quietly on startup (at most once per day, and only when
+  Wi-Fi is already on — it never turns Wi-Fi on by itself). Disable this under
+  **Settings > Check for Updates on Startup**.
+
+Your token, database ID, and sync state are never touched by an update, and a
+failed download can't corrupt the plugin (files are verified before anything is
+overwritten).
+
+> First time on auto-update? Install 1.1.0 manually once (see below); after that,
+> future releases can be installed straight from the device.
+
+### Manually (USB)
 
 Copy the new `notionsync.koplugin` folder over the existing one (or download
 the latest release and extract it in place). Your token, database ID, and sync

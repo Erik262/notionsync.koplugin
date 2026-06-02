@@ -2,6 +2,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local InputDialog = require("ui/widget/inputdialog")
+local ConfirmBox = require("ui/widget/confirmbox")
 local Menu = require("ui/widget/menu")
 local json = require("json")
 local NetworkMgr = require("ui/network/manager")
@@ -12,6 +13,7 @@ local Dispatcher = require("dispatcher")
 for _, name in ipairs({
     "custom_logger", "menus", "get_highlights", "notion_client",
     "sync_manager", "sync_progress_dialog", "sync_state_store", "sync_decision",
+    "update_manager",
 }) do
     package.loaded[name] = nil
 end
@@ -23,6 +25,7 @@ local NotionClient = require("notion_client")
 local SyncManager = require("sync_manager")
 local SyncProgressDialog = require("sync_progress_dialog")
 local SyncStateStore = require("sync_state_store")
+local UpdateManager = require("update_manager")
 
 local function getPluginDir()
     local source = debug.getinfo(1, "S").source or ""
@@ -54,13 +57,21 @@ local function loadLuaTable(path)
     return result
 end
 
+-- Installed plugin version. MUST be bumped to match each GitHub release tag,
+-- otherwise the in-app updater cannot tell when a newer release is available.
+local PLUGIN_VERSION = "1.1.0"
+
 local NotionSync = WidgetContainer:new{
     name = "NotionSync",
+    version = PLUGIN_VERSION,
     config = {
         notion_token = "",
         database_id = "",
         notion_version = "2022-06-28",
-        metadata_sync = true
+        metadata_sync = true,
+        auto_update_check = true,
+        skipped_version = "",
+        last_update_check = 0,
     },
     client = nil,
     plugin_dir = nil,
@@ -93,6 +104,19 @@ function NotionSync:init()
         title = "NotionSync: Sync Current Book",
         general = true,
     })
+
+    -- Quietly check for a newer release shortly after startup. This never turns
+    -- Wi-Fi on by itself (it only checks when already online) and runs at most
+    -- once per day, so it stays out of the way.
+    if self.config.auto_update_check ~= false then
+        UIManager:scheduleIn(8, function()
+            local now = os.time()
+            local last = self.config.last_update_check or 0
+            if NetworkMgr:isOnline() and (now - last) > 86400 then
+                self:checkForUpdates({ silent = true })
+            end
+        end)
+    end
 end
 
 function NotionSync:addToMainMenu(menu_items)
@@ -139,6 +163,15 @@ function NotionSync:loadConfig()
             end
             if loaded.metadata_sync ~= nil then
                 self.config.metadata_sync = loaded.metadata_sync and true or false
+            end
+            if loaded.auto_update_check ~= nil then
+                self.config.auto_update_check = loaded.auto_update_check and true or false
+            end
+            if loaded.skipped_version ~= nil then
+                self.config.skipped_version = loaded.skipped_version or ""
+            end
+            if loaded.last_update_check ~= nil then
+                self.config.last_update_check = tonumber(loaded.last_update_check) or 0
             end
             if loaded.notion_token ~= nil and loaded.notion_token ~= "" then
                 self.config.notion_token = loaded.notion_token
@@ -191,7 +224,10 @@ function NotionSync:saveConfig()
     if runtime_file then
         runtime_file:write(json.encode({
             notion_version = self.config.notion_version or "2022-06-28",
-            metadata_sync = self.config.metadata_sync and true or false
+            metadata_sync = self.config.metadata_sync and true or false,
+            auto_update_check = self.config.auto_update_check ~= false,
+            skipped_version = self.config.skipped_version or "",
+            last_update_check = self.config.last_update_check or 0
         }))
         runtime_file:close()
     else
@@ -265,6 +301,7 @@ function NotionSync:showConfigMenu()
     end
 
     local metadata_info = self.config.metadata_sync and "Enabled" or "Disabled"
+    local autoupdate_info = (self.config.auto_update_check ~= false) and "Enabled" or "Disabled"
 
     local settings_menu -- Forward declaration
     
@@ -295,6 +332,26 @@ function NotionSync:showConfigMenu()
                     if settings_menu then UIManager:close(settings_menu) end
                     self:showConfigMenu()
                 end
+            },
+            {
+                text = "Check for Updates",
+                sub_text = "Installed: v" .. tostring(self.version),
+                callback = function()
+                    if settings_menu then UIManager:close(settings_menu) end
+                    self:checkForUpdates({ silent = false })
+                end,
+            },
+            {
+                text = "Check for Updates on Startup",
+                sub_text = autoupdate_info,
+                callback = function()
+                    self.config.auto_update_check = not (self.config.auto_update_check ~= false)
+                    self:saveConfig()
+                    self:notify("Startup update check "
+                        .. ((self.config.auto_update_check ~= false) and "Enabled" or "Disabled"))
+                    if settings_menu then UIManager:close(settings_menu) end
+                    self:showConfigMenu()
+                end,
             },
             {
                 text = "Credentials File",
@@ -456,6 +513,228 @@ function NotionSync:closeProgressPopup(dialog_ref)
         UIManager:close(dialog_ref[1])
         dialog_ref[1] = nil
     end
+end
+
+-- =========================================================
+-- IN-APP UPDATER
+-- =========================================================
+
+function NotionSync:disableWifiIfEnabled(enabled)
+    if not enabled then return end
+    pcall(function()
+        if NetworkMgr.disableWifi then
+            NetworkMgr:disableWifi()
+        elseif NetworkMgr.turnOffWifi then
+            NetworkMgr:turnOffWifi()
+        elseif NetworkMgr.setWifiState then
+            NetworkMgr:setWifiState(false)
+        end
+    end)
+end
+
+-- Ensure Wi-Fi is online, then call callback(enabled_by_us). enabled_by_us is
+-- true if we had to turn Wi-Fi on (so the caller knows to turn it back off).
+function NotionSync:ensureWifi(callback)
+    if NetworkMgr:isOnline() then
+        callback(false)
+        return
+    end
+
+    local ok = pcall(function() NetworkMgr:enableWifi() end)
+    if not ok then
+        self:notify("Failed to turn Wi-Fi on")
+        return
+    end
+
+    local waiting = InfoMessage:new{ text = "Turning Wi-Fi on...", timeout = nil }
+    UIManager:show(waiting)
+
+    local attempts = 0
+    local function poll()
+        if NetworkMgr:isOnline() then
+            UIManager:close(waiting)
+            callback(true)
+            return
+        end
+        attempts = attempts + 1
+        if attempts > 40 then
+            UIManager:close(waiting)
+            self:disableWifiIfEnabled(true)
+            self:notify("Wi-Fi did not come online")
+            return
+        end
+        UIManager:scheduleIn(0.5, poll)
+    end
+    UIManager:scheduleIn(0.5, poll)
+end
+
+-- Check GitHub for a newer release. opts.silent suppresses "up to date" /
+-- failure messages and never turns Wi-Fi on by itself.
+function NotionSync:checkForUpdates(opts)
+    opts = opts or {}
+    local silent = opts.silent and true or false
+
+    local function doCheck(enabled_by_us)
+        local checking
+        if not silent then
+            checking = InfoMessage:new{ text = "Checking for updates...", timeout = nil }
+            UIManager:show(checking)
+        end
+
+        local latest, err = UpdateManager.getLatestRelease(silent)
+
+        if checking then UIManager:close(checking) end
+
+        -- Remember when we last checked so the daily silent check backs off.
+        self.config.last_update_check = os.time()
+        self:saveConfig()
+
+        if not latest then
+            self:disableWifiIfEnabled(enabled_by_us)
+            if silent then
+                logger.warn("NotionSync: silent update check failed: " .. tostring(err))
+            else
+                self:notify("Update check failed: " .. tostring(err))
+            end
+            return
+        end
+
+        if not UpdateManager.isNewer(latest.tag, self.version) then
+            self:disableWifiIfEnabled(enabled_by_us)
+            if not silent then
+                self:notify("You're up to date (v" .. tostring(self.version) .. ")")
+            end
+            return
+        end
+
+        if silent and self.config.skipped_version == latest.tag then
+            self:disableWifiIfEnabled(enabled_by_us)
+            return
+        end
+
+        self:promptUpdate(latest, enabled_by_us)
+    end
+
+    if NetworkMgr:isOnline() then
+        UIManager:nextTick(function() doCheck(false) end)
+    elseif silent then
+        return  -- never enable Wi-Fi for a background check
+    else
+        self:ensureWifi(doCheck)
+    end
+end
+
+-- Ask the user whether to install the newer release.
+function NotionSync:promptUpdate(latest, enabled_by_us)
+    local text = "A new version of NotionSync is available.\n\n"
+        .. "Installed: v" .. tostring(self.version) .. "\n"
+        .. "Available: " .. tostring(latest.tag) .. "\n\n"
+        .. "Update now over Wi-Fi?"
+
+    UIManager:show(ConfirmBox:new{
+        text = text,
+        ok_text = "Update",
+        ok_callback = function()
+            self:performUpdate(latest, enabled_by_us)
+        end,
+        cancel_text = "Skip",
+        cancel_callback = function()
+            self.config.skipped_version = latest.tag
+            self:saveConfig()
+            self:disableWifiIfEnabled(enabled_by_us)
+            self:notify("Skipped " .. tostring(latest.tag))
+        end,
+    })
+end
+
+-- Download every file in the release into memory, then (only if all succeed)
+-- overwrite the plugin's files. Keeps the plugin intact if a download fails.
+function NotionSync:performUpdate(latest, enabled_by_us)
+    local popup = { nil }
+    local function show(text)
+        if popup[1] then UIManager:close(popup[1]) end
+        popup[1] = InfoMessage:new{ text = text, timeout = nil }
+        UIManager:show(popup[1])
+    end
+    local function closePopup()
+        if popup[1] then UIManager:close(popup[1]); popup[1] = nil end
+    end
+
+    local co = coroutine.create(function()
+        show("Preparing update...")
+        coroutine.yield()
+
+        local files, err = UpdateManager.listReleaseFiles(latest.tag)
+        if not files then
+            closePopup()
+            self:disableWifiIfEnabled(enabled_by_us)
+            self:notify("Update failed: " .. tostring(err))
+            return
+        end
+
+        local contents = {}
+        for i, f in ipairs(files) do
+            show("Downloading " .. tostring(latest.tag) .. "\n"
+                .. i .. " / " .. #files .. "  (" .. f.name .. ")")
+            coroutine.yield()
+            local data, derr = UpdateManager.fetchFile(f.url)
+            if not data then
+                closePopup()
+                self:disableWifiIfEnabled(enabled_by_us)
+                self:notify("Download failed (" .. f.name .. "): " .. tostring(derr))
+                return
+            end
+            contents[f.name] = data
+        end
+
+        -- Wi-Fi no longer needed once everything is in memory.
+        self:disableWifiIfEnabled(enabled_by_us)
+
+        show("Installing update...")
+        coroutine.yield()
+
+        local write_failed
+        for name, data in pairs(contents) do
+            local fh = io.open(joinPath(self.plugin_dir, name), "wb")
+            if not fh then
+                write_failed = name
+                break
+            end
+            fh:write(data)
+            fh:close()
+        end
+
+        closePopup()
+
+        if write_failed then
+            self:notify("Install error writing " .. write_failed .. " — update incomplete")
+            return
+        end
+
+        self.config.skipped_version = ""
+        self:saveConfig()
+
+        UIManager:show(InfoMessage:new{
+            text = "NotionSync " .. tostring(latest.tag) .. " installed.\n\n"
+                .. "Please fully close and reopen KOReader to finish updating.",
+            timeout = nil,
+        })
+    end)
+
+    local function pump()
+        if coroutine.status(co) == "suspended" then
+            local ok, res = coroutine.resume(co)
+            if not ok then
+                closePopup()
+                self:disableWifiIfEnabled(enabled_by_us)
+                logger.err("NotionSync update crash: " .. tostring(res))
+                self:notify("Update crash: " .. tostring(res))
+            else
+                UIManager:nextTick(pump)
+            end
+        end
+    end
+    UIManager:nextTick(pump)
 end
 
 function NotionSync:withManagedWifi(sync_mode, sync_func)
