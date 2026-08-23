@@ -59,7 +59,7 @@ end
 
 -- Installed plugin version. MUST be bumped to match each GitHub release tag,
 -- otherwise the in-app updater cannot tell when a newer release is available.
-local PLUGIN_VERSION = "1.1.0"
+local PLUGIN_VERSION = "1.1.1"
 
 local NotionSync = WidgetContainer:new{
     name = "NotionSync",

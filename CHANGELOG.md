@@ -5,6 +5,18 @@ All notable changes to NotionSync are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-08-23
+
+### Fixed
+- **Restored the required `_meta.lua` plugin manifest.** It had been removed in an
+  earlier commit, so releases up to and including 1.1.0 shipped without it.
+  KOReader requires this file: when a plugin is disabled — or when
+  "disable external plugins" is set, which some builds default to — KOReader loads
+  `_meta.lua` in place of `main.lua`, so a missing file produced
+  `Error when loading .../_meta.lua` and the plugin could not be listed or
+  enabled in **Plugin management**. It also supplies the name and description
+  shown there.
+
 ## [1.1.0] - 2026-06-02
 
 ### Added
@@ -52,5 +64,6 @@ First public release.
 - `config.json` and `notion_credentials.lua` are no longer shipped in the release
   archive, so installing an update over an existing installation preserves your settings.
 
+[1.1.1]: https://github.com/Erik262/notionsync.koplugin/releases/tag/v1.1.1
 [1.1.0]: https://github.com/Erik262/notionsync.koplugin/releases/tag/v1.1.0
 [1.0.0]: https://github.com/Erik262/notionsync.koplugin/releases/tag/v1.0.0
